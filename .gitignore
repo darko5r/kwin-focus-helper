@@ -1,0 +1,53 @@
+# -------------------------
+# Rust build artifacts
+# -------------------------
+/target/
+/focusctl/target/
+**/*.rs.bk
+
+# Cargo lock for libraries (optional)
+#Cargo.lock
+
+# -------------------------
+# KWin Script artifacts
+# -------------------------
+# Do NOT ignore the script itself:
+# contents/code/focus-helper.js
+# (We need this file in the repo)
+
+# Ignore temp/runtime files KDE may generate
+**/.directory
+**/.kwin-script-tmp*/
+**/.cache/
+
+# -------------------------
+# Installer temporary files
+# -------------------------
+*.tmp
+*.bak
+
+# -------------------------
+# Logs and debug output
+# -------------------------
+*.log
+*.trace
+*.dbg
+
+# -------------------------
+# IDE / editor configs
+# -------------------------
+.vscode/
+.idea/
+*.iml
+
+# -------------------------
+# OS-level trash files
+# -------------------------
+.DS_Store
+Thumbs.db
+*~
+
+# -------------------------
+# Meson build (future use)
+# -------------------------
+/build/
