@@ -5,7 +5,9 @@
 /focusctl/target/
 **/*.rs.bk
 
-# Cargo lock for libraries (optional)
+# If you treat this as a library and want reproducible builds across users,
+# you can uncomment the next line. For a small CLI tool, it's also OK
+# (and often nice) to commit Cargo.lock.
 #Cargo.lock
 
 # -------------------------
@@ -13,15 +15,14 @@
 # -------------------------
 # Do NOT ignore the script itself:
 # contents/code/focus-helper.js
-# (We need this file in the repo)
 
-# Ignore temp/runtime files KDE may generate
+# Ignore temp/runtime files KDE or file managers may generate
 **/.directory
 **/.kwin-script-tmp*/
 **/.cache/
 
 # -------------------------
-# Installer temporary files
+# Installer / script temporary files
 # -------------------------
 *.tmp
 *.bak
@@ -39,15 +40,20 @@
 .vscode/
 .idea/
 *.iml
+*.code-workspace
+
+# Vim/Neovim/Kate/etc. swap/backup files
+*~
+*.swp
+*.swo
 
 # -------------------------
 # OS-level trash files
 # -------------------------
 .DS_Store
 Thumbs.db
-*~
 
 # -------------------------
-# Meson build (future use)
+# Meson / generic build dir (future use)
 # -------------------------
 /build/
