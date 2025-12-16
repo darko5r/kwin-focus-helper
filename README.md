@@ -65,7 +65,7 @@ focusctl remove-class google-chrome
 ## Install
 
 ```
-git clone <your-repo-url> kwin-focus-helper
+git clone https://github.com/darko5r/kwin-focus-helper.git
 cd kwin-focus-helper
 chmod +x install.sh
 ./install.sh
