@@ -56,14 +56,14 @@ This effectively gives those apps *“Focus stealing = None”* behavior — **a
 
 A small helper to manage configuration safely:
 
-```bash
+```
 focusctl list-classes
 focusctl add-class google-chrome
 focusctl remove-class google-chrome
 
 ## Install
 
-```bash
+```
 git clone <your-repo-url> kwin-focus-helper
 cd kwin-focus-helper
 chmod +x install.sh
