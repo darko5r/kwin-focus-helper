@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const GROUP_NAME: &str = "Script-kwin-focus-helper";
@@ -17,13 +17,14 @@ fn config_path() -> PathBuf {
 
 fn parse_classes(value: &str) -> Vec<String> {
     value
-        .split(|c| c == ';' || c == ',')
+        .split(|c| c == ';' || c == ',' || c == ' ' || c == '\t' || c == '\n' || c == '\r')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
 }
 
 fn join_classes(classes: &[String]) -> String {
+    // Use ';' because KWin configs commonly store lists like this.
     classes.join(";")
 }
 
@@ -31,62 +32,74 @@ fn read_kwinrc() -> io::Result<String> {
     fs::read_to_string(config_path())
 }
 
-fn write_kwinrc(contents: &str) -> io::Result<()> {
-    fs::write(config_path(), contents)
+fn atomic_write(path: &Path, contents: &str) -> io::Result<()> {
+    let tmp = path.with_extension("tmp.kwin-focus-helper");
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()?;
+    }
+    fs::rename(tmp, path)?;
+    Ok(())
 }
 
+#[derive(Debug)]
 struct ScriptConfig {
-    has_group: bool,
-    group_index: Option<usize>,
-    value_index: Option<usize>,
+    group_header_index: Option<usize>,
+    value_line_index: Option<usize>,
     value: String,
 }
 
+/// Finds `[Script-kwin-focus-helper]` group and `forceFocusClasses=...` within it.
+/// Correctly tracks group boundaries.
 fn extract_script_config(lines: &[String]) -> ScriptConfig {
-    let mut has_group = false;
-    let mut group_index = None;
-    let mut value_index = None;
-    let mut value = String::new();
-
     let target_header = format!("[{}]", GROUP_NAME);
+    let mut in_group = false;
+
+    let mut group_header_index = None;
+    let mut value_line_index = None;
+    let mut value = String::new();
 
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
 
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
             if trimmed == target_header {
-                has_group = true;
-                group_index = Some(i);
+                in_group = true;
+                group_header_index = Some(i);
             } else {
-                // leaving group
+                in_group = false;
             }
             continue;
         }
 
-        if has_group && trimmed.starts_with(&(KEY_NAME.to_string() + "=")) {
-            value_index = Some(i);
-            let v = &trimmed[KEY_NAME.len() + 1..];
-            value = v.to_string();
+        if in_group {
+            let prefix = format!("{}=", KEY_NAME);
+            if trimmed.starts_with(&prefix) {
+                value_line_index = Some(i);
+                value = trimmed[prefix.len()..].to_string();
+            }
         }
     }
 
     ScriptConfig {
-        has_group,
-        group_index,
-        value_index,
+        group_header_index,
+        value_line_index,
         value,
     }
 }
 
 fn reload_kwin_config() {
-    // Try qdbus6 first, then qdbus, ignore errors
-    let cmds = [
+    // Plasma 5/6: possible binaries
+    let cmds: &[(&str, [&str; 3])] = &[
         ("qdbus6", ["org.kde.KWin", "/KWin", "reconfigure"]),
+        ("qdbus-qt6", ["org.kde.KWin", "/KWin", "reconfigure"]),
+        ("qdbus-qt5", ["org.kde.KWin", "/KWin", "reconfigure"]),
         ("qdbus", ["org.kde.KWin", "/KWin", "reconfigure"]),
     ];
 
     for (prog, args) in cmds {
-        if let Ok(status) = Command::new(prog).args(&args).status() {
+        if let Ok(status) = Command::new(prog).args(args).status() {
             if status.success() {
                 eprintln!("focusctl: requested KWin reconfigure via {}", prog);
                 return;
@@ -95,7 +108,7 @@ fn reload_kwin_config() {
     }
 
     eprintln!(
-        "focusctl: could not call qdbus/qdbus6; you may need to run:\n\
+        "focusctl: could not call qdbus/qdbus6; you may need to run manually:\n\
          \tqdbus org.kde.KWin /KWin reconfigure"
     );
 }
@@ -112,37 +125,38 @@ fn get_classes() -> io::Result<Vec<String>> {
     Ok(parse_classes(&cfg.value))
 }
 
-fn set_classes(new_classes: &[String]) -> io::Result<()> {
+fn set_classes(new_classes: &[String], do_reconfigure: bool) -> io::Result<()> {
+    let path = config_path();
     let contents = read_kwinrc().unwrap_or_default();
+
     let mut lines: Vec<String> = if contents.is_empty() {
         Vec::new()
     } else {
         contents.lines().map(|s| s.to_string()).collect()
     };
 
-    let mut cfg = extract_script_config(&lines);
+    let cfg = extract_script_config(&lines);
+
     let joined = join_classes(new_classes);
     let new_line = format!("{}={}", KEY_NAME, joined);
 
-    if cfg.has_group {
-        if let Some(idx) = cfg.value_index {
-            // Replace existing value line
-            lines[idx] = new_line;
-        } else if let Some(header_idx) = cfg.group_index {
-            // Insert just after group header
-            lines.insert(header_idx + 1, new_line);
-        } else {
-            // Group but no header index? Append at end as fallback
+    match (cfg.group_header_index, cfg.value_line_index) {
+        (Some(_hdr), Some(val_idx)) => {
+            // Replace existing value
+            lines[val_idx] = new_line;
+        }
+        (Some(hdr_idx), None) => {
+            // Insert just after header
+            lines.insert(hdr_idx + 1, new_line);
+        }
+        (None, _) => {
+            // Append new group at end
+            if !lines.is_empty() && !lines.last().unwrap().is_empty() {
+                lines.push(String::new());
+            }
             lines.push(format!("[{}]", GROUP_NAME));
             lines.push(new_line);
         }
-    } else {
-        // Append new group
-        if !lines.is_empty() && !lines.last().unwrap().is_empty() {
-            lines.push(String::new());
-        }
-        lines.push(format!("[{}]", GROUP_NAME));
-        lines.push(new_line);
     }
 
     let mut out = String::new();
@@ -151,16 +165,28 @@ fn set_classes(new_classes: &[String]) -> io::Result<()> {
         out.push('\n');
     }
 
-    write_kwinrc(&out)?;
-    reload_kwin_config();
+    atomic_write(&path, &out)?;
+
+    if do_reconfigure {
+        reload_kwin_config();
+    }
+
     Ok(())
 }
 
 fn usage() {
+    eprintln!("kwin-focus-helper / focusctl");
+    eprintln!();
     eprintln!("Usage:");
     eprintln!("  focusctl list-classes");
     eprintln!("  focusctl add-class <window-class>");
     eprintln!("  focusctl remove-class <window-class>");
+    eprintln!("  focusctl set-classes <c1;c2;c3>");
+    eprintln!("  focusctl clear");
+    eprintln!();
+    eprintln!("Notes:");
+    eprintln!("  - Classes can be separated by ';' or ',' or whitespace.");
+    eprintln!("  - Wayland apps may show '*.desktop' (e.g. google-chrome.desktop).");
 }
 
 fn main() {
@@ -176,22 +202,18 @@ fn main() {
     };
 
     match cmd.as_str() {
-        "list-classes" => {
-            match get_classes() {
-                Ok(classes) => {
-                    if classes.is_empty() {
-                        println!("(no forced classes configured)");
-                    } else {
-                        for c in classes {
-                            println!("{}", c);
-                        }
+        "list-classes" => match get_classes() {
+            Ok(classes) => {
+                if classes.is_empty() {
+                    println!("(no forced classes configured)");
+                } else {
+                    for c in classes {
+                        println!("{}", c);
                     }
                 }
-                Err(e) => {
-                    eprintln!("focusctl: failed to read config: {}", e);
-                }
             }
-        }
+            Err(e) => eprintln!("focusctl: failed to read config: {}", e),
+        },
 
         "add-class" => {
             let class = match args.next() {
@@ -204,8 +226,8 @@ fn main() {
 
             let mut classes = get_classes().unwrap_or_default();
             if !classes.iter().any(|c| c == &class) {
-                classes.push(class.clone());
-                if let Err(e) = set_classes(&classes) {
+                classes.push(class);
+                if let Err(e) = set_classes(&classes, true) {
                     eprintln!("focusctl: failed to write config: {}", e);
                 } else {
                     eprintln!("focusctl: added class");
@@ -233,15 +255,39 @@ fn main() {
                 return;
             }
 
-            if let Err(e) = set_classes(&classes) {
+            if let Err(e) = set_classes(&classes, true) {
                 eprintln!("focusctl: failed to write config: {}", e);
             } else {
                 eprintln!("focusctl: removed class");
             }
         }
 
-        _ => {
-            usage();
+        "set-classes" => {
+            let spec = match args.next() {
+                Some(s) => s,
+                None => {
+                    eprintln!("focusctl: set-classes requires a list like 'a;b;c'");
+                    return;
+                }
+            };
+
+            let classes = parse_classes(&spec);
+            if let Err(e) = set_classes(&classes, true) {
+                eprintln!("focusctl: failed to write config: {}", e);
+            } else {
+                eprintln!("focusctl: set classes");
+            }
         }
+
+        "clear" => {
+            let classes: Vec<String> = Vec::new();
+            if let Err(e) = set_classes(&classes, true) {
+                eprintln!("focusctl: failed to write config: {}", e);
+            } else {
+                eprintln!("focusctl: cleared classes");
+            }
+        }
+
+        _ => usage(),
     }
 }
