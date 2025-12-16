@@ -2,132 +2,161 @@
 set -euo pipefail
 
 SCRIPT_ID="kwin-focus-helper"
-
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEST_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/kwin/scripts/${SCRIPT_ID}"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="${HOME}/.local/bin"
 
-ADD_DEFAULTS="0"
-for arg in "${@:-}"; do
-  case "$arg" in
-    --add-defaults|--add-chrome)
-      ADD_DEFAULTS="1"
-      ;;
-    -h|--help)
-      cat <<EOF
-Usage: ./install.sh [--add-defaults]
+# -----------------------------
+# args
+# -----------------------------
+FORCE=0
+NO_ENABLE=0
+NO_RECONF=0
+NO_FOCUSCTL=0
+USER_UID=""
 
-Installs:
-  - KWin script into: ${XDG_DATA_HOME:-$HOME/.local/share}/kwin/scripts/${SCRIPT_ID}
-  - focusctl binary into: ${HOME}/.local/bin (if cargo exists)
-Enables the script in kwinrc and asks KWin to reconfigure.
+usage() {
+  cat <<EOF
+Usage: ./install.sh [options]
 
 Options:
-  --add-defaults   Adds common browser classes to the forced list:
-                   google-chrome, google-chrome-stable, chromium, chromium-browser
+  --force            Uninstall existing script without asking
+  --no-enable        Do not auto-enable script in kwinrc
+  --no-reconfigure   Do not call qdbus6 reconfigure
+  --no-focusctl      Do not build/install focusctl
+  --user <uid>       Run install actions as UID (recommended if your KDE session is not root)
+  -h, --help         Show this help
 EOF
-      exit 0
-      ;;
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force) FORCE=1; shift;;
+    --no-enable) NO_ENABLE=1; shift;;
+    --no-reconfigure) NO_RECONF=1; shift;;
+    --no-focusctl) NO_FOCUSCTL=1; shift;;
+    --user) USER_UID="${2:-}"; shift 2;;
+    -h|--help) usage; exit 0;;
+    *) echo "Unknown option: $1" >&2; usage; exit 2;;
   esac
 done
 
-echo "==> Installing KWin script to: ${DEST_DIR}"
-mkdir -p "${DEST_DIR}/contents/code"
-cp -v "${SRC_DIR}/metadata.json" "${DEST_DIR}/"
-cp -v "${SRC_DIR}/contents/code/focus-helper.js" "${DEST_DIR}/contents/code/"
-
-echo
-
-# ---------------------------------------------------------
-# Build + install focusctl CLI (Rust)
-# ---------------------------------------------------------
-FOCUSCTL_BIN=""
-
-if command -v cargo >/dev/null 2>&1 && [ -d "${SRC_DIR}/focusctl" ]; then
-  echo "==> Building focusctl (Rust CLI)…"
-  (
-    cd "${SRC_DIR}/focusctl"
-    cargo build --release
-  )
-
-  mkdir -p "${BIN_DIR}"
-  cp -v "${SRC_DIR}/focusctl/target/release/focusctl" "${BIN_DIR}/"
-  FOCUSCTL_BIN="${BIN_DIR}/focusctl"
-
-  echo "==> Installed focusctl to: ${FOCUSCTL_BIN}"
-  echo "    (Make sure ${BIN_DIR} is in your PATH)"
-else
-  echo "==> Skipping focusctl build (cargo missing or focusctl/ not found)"
-fi
-
-echo
-
-# ---------------------------------------------------------
-# Enable the KWin script in kwinrc (Plasma 5/6)
-# ---------------------------------------------------------
-KWRC_TOOL=""
-
-if command -v kwriteconfig6 >/dev/null 2>&1; then
-  KWRC_TOOL="kwriteconfig6"
-elif command -v kwriteconfig5 >/dev/null 2>&1; then
-  KWRC_TOOL="kwriteconfig5"
-fi
-
-if [ -n "${KWRC_TOOL}" ]; then
-  echo "==> Enabling KWin script plugin '${SCRIPT_ID}' in kwinrc via ${KWRC_TOOL}…"
-  "${KWRC_TOOL}" --file kwinrc --group Plugins --key "${SCRIPT_ID}Enabled" "true"
-  echo "    Wrote: [Plugins] ${SCRIPT_ID}Enabled=true"
-else
-  echo "!! kwriteconfig5/6 not found – cannot auto-enable the script."
-  echo "   Enable manually in: System Settings → Window Management → KWin Scripts"
-fi
-
-echo
-
-# ---------------------------------------------------------
-# Ask KWin to reload configuration
-# ---------------------------------------------------------
-echo "==> Requesting KWin to reload configuration…"
-
-if command -v qdbus6 >/dev/null 2>&1; then
-  qdbus6 org.kde.KWin /KWin reconfigure || true
-elif command -v qdbus-qt6 >/dev/null 2>&1; then
-  qdbus-qt6 org.kde.KWin /KWin reconfigure || true
-elif command -v qdbus-qt5 >/dev/null 2>&1; then
-  qdbus-qt5 org.kde.KWin /KWin reconfigure || true
-elif command -v qdbus >/dev/null 2>&1; then
-  qdbus org.kde.KWin /KWin reconfigure || true
-else
-  echo "!! No qdbus found – cannot tell KWin to reconfigure automatically."
-  echo "   Log out/in or restart KWin if needed."
-fi
-
-echo
-
-# ---------------------------------------------------------
-# Optional: add default classes
-# ---------------------------------------------------------
-if [ "${ADD_DEFAULTS}" = "1" ]; then
-  if [ -n "${FOCUSCTL_BIN}" ] && [ -x "${FOCUSCTL_BIN}" ]; then
-    echo "==> Adding default forced classes…"
-    "${FOCUSCTL_BIN}" add-class google-chrome || true
-    "${FOCUSCTL_BIN}" add-class google-chrome-stable || true
-    "${FOCUSCTL_BIN}" add-class chromium || true
-    "${FOCUSCTL_BIN}" add-class chromium-browser || true
-    echo "==> Defaults added."
+run_as() {
+  if [[ -n "$USER_UID" ]]; then
+    sudo -u "#${USER_UID}" -H -- "$@"
   else
-    echo "!! Cannot add defaults because focusctl is not installed."
+    "$@"
+  fi
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "!! Missing required command: $1" >&2
+    exit 1
+  }
+}
+
+echo "==> kwin-focus-helper installer"
+echo "    repo: $REPO_DIR"
+[[ -n "$USER_UID" ]] && echo "    installing as uid: $USER_UID"
+
+need_cmd kpackagetool6
+
+# -----------------------------
+# sanity checks for package structure
+# -----------------------------
+if [[ ! -f "$REPO_DIR/metadata.json" ]]; then
+  echo "!! metadata.json not found in repo root" >&2
+  exit 1
+fi
+
+if [[ ! -f "$REPO_DIR/contents/code/main.js" ]]; then
+  echo "!! contents/code/main.js not found" >&2
+  echo "   (KWin requires main script at contents/code/main.js)" >&2
+  exit 1
+fi
+
+# -----------------------------
+# detect existing install
+# -----------------------------
+already_installed=0
+if run_as kpackagetool6 --type=KWin/Script -l | grep -qx "$SCRIPT_ID"; then
+  already_installed=1
+fi
+
+if [[ $already_installed -eq 1 ]]; then
+  echo "==> Detected existing install: $SCRIPT_ID"
+  if [[ $FORCE -eq 1 ]]; then
+    echo "==> --force set: uninstalling existing script..."
+    run_as kpackagetool6 --type=KWin/Script -r "$SCRIPT_ID"
+  else
+    read -r -p "Reinstall (uninstall + install) it? [y/N] " ans
+    if [[ "$ans" =~ ^[Yy]$ ]]; then
+      run_as kpackagetool6 --type=KWin/Script -r "$SCRIPT_ID"
+    else
+      echo "==> Cancelled."
+      exit 0
+    fi
   fi
 fi
 
+# -----------------------------
+# install package
+# -----------------------------
+echo "==> Installing KWin script via kpackagetool6..."
+run_as kpackagetool6 --type=KWin/Script -i "$REPO_DIR"
+
+echo "==> Installed. Verifying..."
+run_as kpackagetool6 --type=KWin/Script -l | grep -qx "$SCRIPT_ID" || {
+  echo "!! Install verification failed (script not listed)" >&2
+  exit 1
+}
+
+# -----------------------------
+# build + install focusctl
+# -----------------------------
+if [[ $NO_FOCUSCTL -eq 0 ]]; then
+  if command -v cargo >/dev/null 2>&1 && [[ -d "$REPO_DIR/focusctl" ]]; then
+    echo "==> Building focusctl..."
+    run_as bash -lc "cd '$REPO_DIR/focusctl' && cargo build --release"
+    mkdir -p "$BIN_DIR"
+    cp -v "$REPO_DIR/focusctl/target/release/focusctl" "$BIN_DIR/"
+    echo "==> focusctl installed to: $BIN_DIR/focusctl"
+    echo "    (ensure $BIN_DIR is in PATH)"
+  else
+    echo "==> Skipping focusctl (cargo missing or focusctl/ directory not found)"
+  fi
+else
+  echo "==> --no-focusctl set: skipping focusctl build/install"
+fi
+
+# -----------------------------
+# enable + reconfigure
+# -----------------------------
+if [[ $NO_ENABLE -eq 0 ]]; then
+  if command -v kwriteconfig6 >/dev/null 2>&1; then
+    echo "==> Enabling script in kwinrc: [Plugins] ${SCRIPT_ID}Enabled=true"
+    run_as kwriteconfig6 --file kwinrc --group Plugins --key "${SCRIPT_ID}Enabled" true
+  else
+    echo "!! kwriteconfig6 not found; cannot auto-enable" >&2
+  fi
+else
+  echo "==> --no-enable set: not enabling in kwinrc"
+fi
+
+if [[ $NO_RECONF -eq 0 ]]; then
+  if command -v qdbus6 >/dev/null 2>&1; then
+    echo "==> Requesting KWin reconfigure..."
+    run_as qdbus6 org.kde.KWin /KWin reconfigure || true
+  else
+    echo "!! qdbus6 not found; cannot auto-reconfigure KWin" >&2
+  fi
+else
+  echo "==> --no-reconfigure set: skipping KWin reconfigure"
+fi
+
+echo
 echo "==> Done."
-echo
-echo "Next steps:"
-echo "  1) Verify the script is enabled:"
-echo "     System Settings → Window Management → KWin Scripts → kwin-focus-helper"
-echo
-echo "  2) Add a class (if you didn't use --add-defaults):"
-echo "     focusctl add-class google-chrome-stable"
-echo "     focusctl add-class ProcletChrome"
-echo
-echo "  3) Test by opening a new Chrome window and verifying it appears on top."
+echo "Next:"
+echo "  focusctl add-class google-chrome-stable"
+echo "  focusctl add-class ProcletChrome"
+echo "Then test opening new windows."

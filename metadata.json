@@ -1,26 +1,19 @@
 {
+  "KPackageStructure": "KWin/Script",
   "KPlugin": {
     "Id": "kwin-focus-helper",
     "Name": "KWin Focus Helper",
     "Description": "Force-focus specific apps (like Chrome launched via proclet) without changing global focus settings.",
     "Icon": "preferences-system-windows",
-    "Version": "0.1",
+    "Version": "0.1.0",
     "License": "MIT",
     "Authors": [
-      {
-        "Name": "Darko P.",
-        "Email": ""
-      }
+      { "Name": "Darko P." }
     ],
-    "Category": "Windows",
     "EnabledByDefault": false
   },
-  "X-KDE-PluginInfo-Name": "kwin-focus-helper",
-  "X-KDE-PluginInfo-Author": "Darko P.",
-  "X-KDE-PluginInfo-Version": "0.1",
-  "X-KDE-PluginInfo-License": "MIT",
-  "X-KDE-PluginInfo-EnabledByDefault": false,
   "X-Plasma-API": "javascript",
+  "X-Plasma-MainScript": "contents/code/main.js",
   "X-KDE-ServiceTypes": [
     "KWin/Script"
   ]
