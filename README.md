@@ -60,6 +60,7 @@ A small helper to manage configuration safely:
 focusctl list-classes
 focusctl add-class google-chrome
 focusctl remove-class google-chrome
+```
 
 ## Install
 
@@ -68,3 +69,4 @@ git clone <your-repo-url> kwin-focus-helper
 cd kwin-focus-helper
 chmod +x install.sh
 ./install.sh
+```
