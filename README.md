@@ -1,5 +1,7 @@
 # kwin-focus-helper
 
+Designed for sandboxed and wrapped applications that need predictable window focus behavior.
+
 A lightweight KWin script + optional Rust CLI that allows **selected applications**
 to bypass KWin’s *focus stealing prevention* — **without changing global window
 behavior**.
@@ -70,3 +72,38 @@ cd kwin-focus-helper
 chmod +x install.sh
 ./install.sh
 ```
+
+## Usage
+
+Add one or more window classes that should be allowed to receive focus:
+
+```
+focusctl add-class google-chrome
+focusctl add-class firefox
+```
+
+New windows from these applications should now appear on top,
+even when global focus stealing prevention is set to *Medium*.
+
+To list or remove entries:
+
+```
+focusctl list-classes
+focusctl remove-class google-chrome
+```
+
+## Integration
+
+`kwin-focus-helper` is designed to be used by launchers and sandboxing tools.
+
+Typical integrations include:
+
+- Adding a window class before launching an application
+- Reconfiguring KWin
+- Launching the sandboxed process
+- Removing the class afterward (optional)
+
+This allows sandboxed applications to behave normally
+without permanently changing user focus policy.
+
+Programmatic integration examples will be added over time.
