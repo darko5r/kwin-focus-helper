@@ -87,7 +87,6 @@ make install ARGS='--no-focusctl'
 Installation check:
 make status
 make test
-
 ```
 
 ## Usage
