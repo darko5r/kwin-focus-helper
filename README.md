@@ -17,6 +17,15 @@ need to raise or focus new windows, such as those launched via:
 
 ---
 
+## Requirements
+
+- KDE Plasma (KWin window manager)
+- Plasma 6 / KWin 6 (should also work on many Plasma 5 setups)
+- `kpackagetool6` (install)
+- Optional: Rust toolchain (`cargo`) — install via your distro packages (e.g. “rust”/“cargo”) or via rustup
+
+---
+
 ## What problem does this solve?
 
 KWin’s *Focus stealing prevention* (often set to **Medium**) is a good global default,
@@ -69,8 +78,16 @@ focusctl remove-class google-chrome
 ```
 git clone https://github.com/darko5r/kwin-focus-helper.git
 cd kwin-focus-helper
-chmod +x install.sh
-./install.sh
+make install
+
+Pass installer options through ARGS, e.g.:
+make reinstall ARGS='-y'
+make install ARGS='--no-focusctl'
+
+Installation check:
+make status
+make test
+
 ```
 
 ## Usage
@@ -107,3 +124,29 @@ This allows sandboxed applications to behave normally
 without permanently changing user focus policy.
 
 Programmatic integration examples will be added over time.
+
+## Troubleshooting
+
+### Script installs but does not appear / update in KWin
+
+In rare cases, KDE’s service cache may be stale (especially after manual file
+removals or repeated installs).
+
+You can fully reset the script and rebuild the cache:
+
+```
+# Remove installed script
+kpackagetool6 --type=KWin/Script -r kwin-focus-helper
+
+# Hard-remove leftovers (per-user)
+rm -rf ~/.local/share/kwin/scripts/kwin-focus-helper
+
+# Rebuild KDE service cache (Plasma 6)
+rm -f ~/.cache/ksycoca6_*
+kbuildsycoca6
+```
+
+After this, install again:
+```
+make install
+```
