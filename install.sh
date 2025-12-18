@@ -179,7 +179,7 @@ echo
 # ---------------------------------------------------------
 heal_layout() {
   local want="$REPO_DIR/contents/code/main.js"
-  local flat="$REPO_DIR/code/main.js"
+  local flat="$REPO_DIR/contents/code/main.js"
 
   if [[ -f "$want" ]]; then
     return 0

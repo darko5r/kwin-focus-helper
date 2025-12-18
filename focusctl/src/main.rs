@@ -7,6 +7,9 @@ use std::process::Command;
 const GROUP_NAME: &str = "Script-kwin-focus-helper";
 const KEY_NAME: &str = "forceFocusClasses";
 
+const SCRIPT_ID: &str = "kwin-focus-helper";
+const PLUGINS_GROUP: &str = "Plugins";
+
 fn config_path() -> PathBuf {
     if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
         return PathBuf::from(xdg).join("kwinrc");
@@ -87,6 +90,42 @@ fn extract_script_config(lines: &[String]) -> ScriptConfig {
         value_line_index,
         value,
     }
+}
+
+/// Finds `[Plugins]` and `kwin-focus-helperEnabled=...` within it.
+fn extract_plugins_enabled(lines: &[String]) -> (Option<usize>, Option<usize>, Option<bool>) {
+    let header = format!("[{}]", PLUGINS_GROUP);
+    let key = format!("{}Enabled", SCRIPT_ID);
+
+    let mut in_group = false;
+    let mut group_header_index = None;
+    let mut value_line_index = None;
+    let mut enabled: Option<bool> = None;
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if trimmed == header {
+                in_group = true;
+                group_header_index = Some(i);
+            } else {
+                in_group = false;
+            }
+            continue;
+        }
+
+        if in_group {
+            let prefix = format!("{}=", key);
+            if trimmed.starts_with(&prefix) {
+                value_line_index = Some(i);
+                let v = trimmed[prefix.len()..].trim().to_lowercase();
+                enabled = Some(v == "true" || v == "1" || v == "yes");
+            }
+        }
+    }
+
+    (group_header_index, value_line_index, enabled)
 }
 
 fn reload_kwin_config() {
@@ -174,6 +213,59 @@ fn set_classes(new_classes: &[String], do_reconfigure: bool) -> io::Result<()> {
     Ok(())
 }
 
+fn get_enabled() -> io::Result<Option<bool>> {
+    let contents = read_kwinrc()?;
+    let lines: Vec<String> = contents.lines().map(|s| s.to_string()).collect();
+    let (_hdr, _val, enabled) = extract_plugins_enabled(&lines);
+    Ok(enabled)
+}
+
+fn set_enabled(enabled: bool, do_reconfigure: bool) -> io::Result<()> {
+    let path = config_path();
+    let contents = read_kwinrc().unwrap_or_default();
+
+    let mut lines: Vec<String> = if contents.is_empty() {
+        Vec::new()
+    } else {
+        contents.lines().map(|s| s.to_string()).collect()
+    };
+
+    let (hdr_idx, val_idx, _cur) = extract_plugins_enabled(&lines);
+
+    let key = format!("{}Enabled", SCRIPT_ID);
+    let new_line = format!("{}={}", key, if enabled { "true" } else { "false" });
+
+    match (hdr_idx, val_idx) {
+        (Some(_h), Some(v)) => {
+            lines[v] = new_line;
+        }
+        (Some(h), None) => {
+            lines.insert(h + 1, new_line);
+        }
+        (None, _) => {
+            if !lines.is_empty() && !lines.last().unwrap().is_empty() {
+                lines.push(String::new());
+            }
+            lines.push(format!("[{}]", PLUGINS_GROUP));
+            lines.push(new_line);
+        }
+    }
+
+    let mut out = String::new();
+    for line in lines {
+        out.push_str(&line);
+        out.push('\n');
+    }
+
+    atomic_write(&path, &out)?;
+
+    if do_reconfigure {
+        reload_kwin_config();
+    }
+
+    Ok(())
+}
+
 fn usage() {
     eprintln!("kwin-focus-helper / focusctl");
     eprintln!();
@@ -183,6 +275,10 @@ fn usage() {
     eprintln!("  focusctl remove-class <window-class>");
     eprintln!("  focusctl set-classes <c1;c2;c3>");
     eprintln!("  focusctl clear");
+    eprintln!("  focusctl enable");
+    eprintln!("  focusctl disable");
+    eprintln!("  focusctl enabled");
+    eprintln!("  focusctl reconfigure");
     eprintln!();
     eprintln!("Notes:");
     eprintln!("  - Classes can be separated by ';' or ',' or whitespace.");
@@ -286,6 +382,33 @@ fn main() {
             } else {
                 eprintln!("focusctl: cleared classes");
             }
+        }
+
+        "enable" => {
+            if let Err(e) = set_enabled(true, true) {
+                eprintln!("focusctl: failed to enable script: {}", e);
+            } else {
+                eprintln!("focusctl: enabled {}", SCRIPT_ID);
+            }
+        }
+
+        "disable" => {
+            if let Err(e) = set_enabled(false, true) {
+                eprintln!("focusctl: failed to disable script: {}", e);
+            } else {
+                eprintln!("focusctl: disabled {}", SCRIPT_ID);
+            }
+        }
+
+        "enabled" => match get_enabled() {
+            Ok(Some(true)) => println!("true"),
+            Ok(Some(false)) => println!("false"),
+            Ok(None) => println!("(unset)"),
+            Err(e) => eprintln!("focusctl: failed to read enabled flag: {}", e),
+        },
+
+        "reconfigure" => {
+            reload_kwin_config();
         }
 
         _ => usage(),
