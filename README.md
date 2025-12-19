@@ -106,6 +106,7 @@ To list or remove entries:
 ```
 focusctl list-classes
 focusctl remove-class google-chrome
+focusctl remove-class firefox
 ```
 
 ## Integration
