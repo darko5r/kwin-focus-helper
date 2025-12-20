@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_ID="kwin-focus-helper"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-ACTION="install"   # install | uninstall | reinstall
+ACTION="install"   # install | uninstall | reinstall | system-install | system-uninstall
 YES=0
 NO_ENABLE=0
 NO_RECONF=0
@@ -12,35 +12,51 @@ NO_FOCUSCTL=0
 USER_UID=""        # run kpackagetool/kwriteconfig as this uid (recommended)
 BIN_DIR=""         # defaults to target user's ~/.local/bin
 
+# ---- system packaging knobs (AUR) ----
+PREFIX="/usr"
+DESTDIR=""         # e.g. "$pkgdir" in PKGBUILD
+SYSTEM=0           # 1 => install files into DESTDIR/PREFIX, no kwin tweaks
+
 usage() {
   cat <<EOF
 kwin-focus-helper installer
 
-Usage:
+User install (recommended for manual use):
   ./install.sh [install|uninstall|reinstall] [options]
 
-Options:
+System install (for packaging / AUR):
+  ./install.sh system-install [--prefix /usr] [--destdir /path] [--no-focusctl]
+  ./install.sh system-uninstall [--prefix /usr] [--destdir /path]
+
+Options (user mode):
   -y, --yes              Do not prompt
   --no-enable            Do not write [Plugins] ${SCRIPT_ID}Enabled=true
   --no-reconfigure       Do not call DBus reconfigure
   --no-focusctl          Do not build/install focusctl
-  --user <uid>           Run actions as UID (recommended if your KDE session user != current user)
+  --user <uid>           Run actions as UID (recommended if KDE session user != current user)
   --bin-dir <path>       Where to copy focusctl (default: target user's ~/.local/bin)
-  -h, --help             Show this help
+
+Options (system mode):
+  --prefix <path>        Install prefix (default: /usr)
+  --destdir <path>       Staging dir (default: empty). In PKGBUILD this is \$pkgdir.
 
 Notes:
-  - KWin/Script packages are expected to have:
+  - KWin/Script layout must include:
       metadata.json
       contents/code/main.js
-    (X-Plasma-MainScript usually points to "code/main.js" which is relative to contents/)
-  - kpackagetool installs per-user (into that user's ~/.local/share)
+  - User mode uses kpackagetool6 (per-user, into ~/.local/share/kwin/scripts)
+  - System mode copies files into:
+      \$DESTDIR\$PREFIX/share/kwin/scripts/${SCRIPT_ID}/...
+    and installs focusctl into:
+      \$DESTDIR\$PREFIX/bin/focusctl
 EOF
 }
 
 # ----- parse args -----
 if [[ $# -gt 0 ]]; then
   case "$1" in
-    install|uninstall|reinstall) ACTION="$1"; shift;;
+    install|uninstall|reinstall|system-install|system-uninstall)
+      ACTION="$1"; shift;;
   esac
 fi
 
@@ -52,6 +68,8 @@ while [[ $# -gt 0 ]]; do
     --no-focusctl) NO_FOCUSCTL=1; shift;;
     --user) USER_UID="${2:-}"; shift 2;;
     --bin-dir) BIN_DIR="${2:-}"; shift 2;;
+    --prefix) PREFIX="${2:-}"; shift 2;;
+    --destdir) DESTDIR="${2:-}"; shift 2;;
     -h|--help) usage; exit 0;;
     *) echo "Unknown option: $1" >&2; usage; exit 2;;
   esac
@@ -135,76 +153,78 @@ target_home() {
 }
 
 # ----- sanity checks -----
-need_cmd kpackagetool6
-
 if [[ ! -f "$REPO_DIR/metadata.json" ]]; then
   echo "!! metadata.json not found in repo root: $REPO_DIR" >&2
   exit 1
 fi
 
 # ---------------------------------------------------------
-# Auto-detect desktop session UID when running as root
+# Layout check only (NO auto-copy for packaging)
 # ---------------------------------------------------------
-if [[ -z "$USER_UID" ]] && [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
-  if uid_guess="$(detect_kde_session_uid 2>/dev/null)"; then
-    USER_UID="$uid_guess"
-    echo "==> Auto-detected active graphical session UID: $USER_UID"
-  else
-    if [[ -n "${SUDO_USER:-}" ]] && id -u "$SUDO_USER" >/dev/null 2>&1; then
-      USER_UID="$(id -u "$SUDO_USER")"
-      echo "==> Fallback: using SUDO_USER UID: $USER_UID ($SUDO_USER)"
-    else
-      echo "!! Could not auto-detect graphical session user via loginctl." >&2
-      echo "   Please rerun with: ./install.sh --user <uid>" >&2
-      exit 1
-    fi
-  fi
-fi
-
-THOME="$(target_home)"
-if [[ -z "$BIN_DIR" ]]; then
-  BIN_DIR="${THOME}/.local/bin"
-fi
-
-echo "==> kwin-focus-helper"
-echo "    action: $ACTION"
-echo "    repo:   $REPO_DIR"
-echo "    as uid: ${USER_UID:-$(id -u)} (home: $THOME)"
-echo "    bindir: $BIN_DIR"
-echo
-
-# ---------------------------------------------------------
-# Auto-heal package layout:
-# KWin/Script expects contents/code/main.js
-# ---------------------------------------------------------
-heal_layout() {
-  local want="$REPO_DIR/contents/code/main.js"
-  local flat="$REPO_DIR/contents/code/main.js"
-
-  if [[ -f "$want" ]]; then
+assert_layout() {
+  if [[ -f "$REPO_DIR/contents/code/main.js" ]]; then
     return 0
   fi
 
-  if [[ -f "$flat" ]]; then
-    echo "==> Repo has code/main.js but missing contents/code/main.js"
-    echo "==> Creating contents/code/main.js (KWin package layout)…"
-    mkdir -p "$REPO_DIR/contents/code"
-    cp -f "$flat" "$want"
-    return 0
-  fi
-
-  echo "!! Missing main script." >&2
-  echo "   Expected either:" >&2
-  echo "     - contents/code/main.js (preferred)" >&2
-  echo "     - code/main.js (will be copied into contents/)" >&2
+  echo "!! Missing main script: $REPO_DIR/contents/code/main.js" >&2
+  echo "   Fix repo layout (required for KWin package format)." >&2
   exit 1
 }
 
+# ---------------------------------------------------------
+# User-mode auto-detect desktop session UID when running as root
+# ---------------------------------------------------------
+if [[ "$ACTION" != system-* ]]; then
+  need_cmd kpackagetool6
+
+  if [[ -z "$USER_UID" ]] && [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    if uid_guess="$(detect_kde_session_uid 2>/dev/null)"; then
+      USER_UID="$uid_guess"
+      echo "==> Auto-detected active graphical session UID: $USER_UID"
+    else
+      if [[ -n "${SUDO_USER:-}" ]] && id -u "$SUDO_USER" >/dev/null 2>&1; then
+        USER_UID="$(id -u "$SUDO_USER")"
+        echo "==> Fallback: using SUDO_USER UID: $USER_UID ($SUDO_USER)"
+      else
+        echo "!! Could not auto-detect graphical session user via loginctl." >&2
+        echo "   Please rerun with: ./install.sh --user <uid>" >&2
+        exit 1
+      fi
+    fi
+  fi
+
+  THOME="$(target_home)"
+  if [[ -z "$BIN_DIR" ]]; then
+    BIN_DIR="${THOME}/.local/bin"
+  fi
+
+  echo "==> kwin-focus-helper"
+  echo "    action: $ACTION"
+  echo "    repo:   $REPO_DIR"
+  echo "    as uid: ${USER_UID:-$(id -u)} (home: $THOME)"
+  echo "    bindir: $BIN_DIR"
+  echo
+else
+  SYSTEM=1
+  NO_ENABLE=1
+  NO_RECONF=1
+
+  echo "==> kwin-focus-helper (system mode)"
+  echo "    action:  $ACTION"
+  echo "    repo:    $REPO_DIR"
+  echo "    prefix:  $PREFIX"
+  echo "    destdir: ${DESTDIR:-<empty>}"
+  echo
+fi
+
+# ---------------------------------------------------------
+# User-mode helpers (kpackagetool)
+# ---------------------------------------------------------
 is_installed() {
   run_as kpackagetool6 --type=KWin/Script -l | grep -qx "$SCRIPT_ID"
 }
 
-do_uninstall() {
+do_uninstall_user() {
   if is_installed; then
     echo "==> Removing existing script: $SCRIPT_ID"
     run_as kpackagetool6 --type=KWin/Script -r "$SCRIPT_ID"
@@ -213,8 +233,8 @@ do_uninstall() {
   fi
 }
 
-do_install() {
-  heal_layout
+do_install_user() {
+  assert_layout
 
   if is_installed; then
     echo "==> Already installed: $SCRIPT_ID"
@@ -238,17 +258,15 @@ do_install() {
   is_installed || { echo "!! Install verification failed (not listed)" >&2; exit 1; }
 }
 
-build_focusctl() {
+build_focusctl_user() {
   if [[ $NO_FOCUSCTL -ne 0 ]]; then
     echo "==> --no-focusctl: skipping focusctl"
     return
   fi
-
   if ! command -v cargo >/dev/null 2>&1; then
     echo "==> cargo not found; skipping focusctl"
     return
   fi
-
   if [[ ! -d "$REPO_DIR/focusctl" ]]; then
     echo "==> focusctl/ not found; skipping focusctl"
     return
@@ -262,7 +280,7 @@ build_focusctl() {
   run_as cp -v "$REPO_DIR/focusctl/target/release/focusctl" "$BIN_DIR/"
 }
 
-enable_script() {
+enable_script_user() {
   if [[ $NO_ENABLE -ne 0 ]]; then
     echo "==> --no-enable: skipping kwinrc enable"
     return
@@ -284,7 +302,7 @@ enable_script() {
   run_as "$kwrite" --file kwinrc --group Plugins --key "${SCRIPT_ID}Enabled" true
 }
 
-kwin_reconfigure() {
+kwin_reconfigure_user() {
   if [[ $NO_RECONF -ne 0 ]]; then
     echo "==> --no-reconfigure: skipping DBus reconfigure"
     return
@@ -332,23 +350,79 @@ kwin_reconfigure() {
   echo "   This is usually fine — changes will apply shortly or via focusctl."
 }
 
+# ---------------------------------------------------------
+# System-mode install/uninstall (for AUR packaging)
+# ---------------------------------------------------------
+system_script_dir() {
+  # KWin searches scripts in $PREFIX/share/kwin/scripts/<id>
+  echo "${DESTDIR}${PREFIX}/share/kwin/scripts/${SCRIPT_ID}"
+}
+
+do_install_system() {
+  assert_layout
+
+  local d
+  d="$(system_script_dir)"
+  echo "==> Installing KWin script to: $d"
+  install -d "$d"
+  install -m 0644 "$REPO_DIR/metadata.json" "$d/metadata.json"
+
+  install -d "$d/contents/code"
+  install -m 0644 "$REPO_DIR/contents/code/main.js" "$d/contents/code/main.js"
+
+  if [[ $NO_FOCUSCTL -ne 0 ]]; then
+    echo "==> --no-focusctl: skipping focusctl"
+    return
+  fi
+
+  if command -v cargo >/dev/null 2>&1 && [[ -d "$REPO_DIR/focusctl" ]]; then
+    echo "==> Building focusctl (release)..."
+    (cd "$REPO_DIR/focusctl" && cargo build --release)
+
+    echo "==> Installing focusctl to: ${DESTDIR}${PREFIX}/bin/focusctl"
+    install -d "${DESTDIR}${PREFIX}/bin"
+    install -m 0755 "$REPO_DIR/focusctl/target/release/focusctl" "${DESTDIR}${PREFIX}/bin/focusctl"
+  else
+    echo "==> cargo or focusctl/ missing; skipping focusctl"
+  fi
+}
+
+do_uninstall_system() {
+  local d
+  d="$(system_script_dir)"
+  echo "==> Removing: $d"
+  rm -rf "$d"
+
+  echo "==> Removing: ${DESTDIR}${PREFIX}/bin/focusctl (if present)"
+  rm -f "${DESTDIR}${PREFIX}/bin/focusctl"
+}
+
+# ---------------------------------------------------------
+# Main
+# ---------------------------------------------------------
 case "$ACTION" in
   install)
-    do_install
-    build_focusctl
-    enable_script
-    kwin_reconfigure
+    do_install_user
+    build_focusctl_user
+    enable_script_user
+    kwin_reconfigure_user
     ;;
   uninstall)
-    do_uninstall
-    kwin_reconfigure
+    do_uninstall_user
+    kwin_reconfigure_user
     ;;
   reinstall)
-    do_uninstall
-    do_install
-    build_focusctl
-    enable_script
-    kwin_reconfigure
+    do_uninstall_user
+    do_install_user
+    build_focusctl_user
+    enable_script_user
+    kwin_reconfigure_user
+    ;;
+  system-install)
+    do_install_system
+    ;;
+  system-uninstall)
+    do_uninstall_system
     ;;
   *)
     echo "Unknown action: $ACTION" >&2
@@ -359,9 +433,17 @@ esac
 
 echo
 echo "==> Done."
-echo "Next (optional):"
-echo "  $BIN_DIR/focusctl add-class google-chrome-stable"
-echo "  $BIN_DIR/focusctl add-class ProcletChrome"
-echo
-echo "Test DBus (best-effort):"
-echo "  qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.isScriptLoaded ${SCRIPT_ID}"
+
+if [[ "$SYSTEM" -eq 0 ]]; then
+  echo "Next (optional):"
+  echo "  $BIN_DIR/focusctl add-class google-chrome-stable"
+  echo "  $BIN_DIR/focusctl add-class ProcletChrome"
+  echo
+  echo "Test DBus (best-effort):"
+  echo "  qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.isScriptLoaded ${SCRIPT_ID}"
+else
+  echo "System install notes:"
+  echo "  - Enable the script per-user in System Settings -> Window Management -> KWin Scripts"
+  echo "    or run: focusctl enable"
+  echo "  - Then reconfigure KWin (log out/in, or: qdbus6 org.kde.KWin /KWin reconfigure)"
+fi
