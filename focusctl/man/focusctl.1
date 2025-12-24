@@ -4,120 +4,169 @@ focusctl \- manage kwin-focus-helper forced-focus classes and integration wrappe
 .SH SYNOPSIS
 .B focusctl
 .RI [ GLOBAL\ OPTIONS ] " COMMAND " [ ARGS... ]
-.PP
-Global options:
-.RS
+
+.SH DESCRIPTION
+\fBfocusctl\fR manages the configuration used by the KWin script
+\fBkwin-focus-helper\fR.
+It edits the user's KWin configuration file (typically
+\fI~/.config/kwinrc\fR) and controls which window classes should forcibly
+receive focus when they appear.
+
+In addition to configuration management, \fBfocusctl\fR provides lightweight
+integration wrappers intended for sandboxing and launcher tools (such as
+proclet, firejail, bubblewrap, or container runtimes). These wrappers allow
+seamless integration without embedding KWin-specific logic into other tools.
+
+Matching is case-insensitive and ignores a trailing \fI.desktop\fR suffix.
+Stored class names preserve the original spelling for readability.
+
+.SH GLOBAL OPTIONS
 .TP
 .BI --uid " UID"
-Target this UID's KWin config/session.
+Target this UID's KWin configuration and graphical session. Useful when running
+as root.
 .TP
 .BI --user " NAME"
-Target this user's KWin config/session.
+Target this user's KWin configuration and graphical session.
 .TP
 .B --session-auto
-Auto-detect the active graphical session user (root-friendly).
-.RE
-.PP
-Commands:
-.RS
+Automatically detect the active graphical session user (root-friendly).
+
+.SH COMMANDS
 .TP
 .B list-classes
-List stored forced-focus classes.
+List configured forced-focus classes using stored spelling.
 .TP
 .B list-classes \-\-keys
-List stored classes with normalized match keys.
+List configured classes together with their normalized match keys.
 .TP
 .B list-keys
 Show stored value \-> normalized match key.
 .TP
 .BI add-class " WINDOW_CLASS"
-Add a class. Matching is normalized; stored spelling is preserved.
+Add a window class to the forced-focus list. Matching is normalized; stored
+spelling is preserved.
 .TP
 .BI remove-class " WINDOW_CLASS"
-Remove by match key (case-insensitive, ignores trailing .desktop).
+Remove a class from the forced-focus list using normalized matching.
 .TP
 .BI set-classes " LIST"
-Replace entire list. Separators: ';' ',' whitespace.
+Replace the entire forced-focus list. Separators may be ';', ',' or whitespace.
 .TP
 .B clear
-Clear all classes.
+Remove all configured classes.
 .TP
 .B enable
-Set \fB[Plugins]\fR \fBkwin-focus-helperEnabled=true\fR.
+Set \fB[Plugins]\fR \fBkwin-focus-helperEnabled=true\fR in the KWin config.
 .TP
 .B disable
-Set \fB[Plugins]\fR \fBkwin-focus-helperEnabled=false\fR.
+Set \fB[Plugins]\fR \fBkwin-focus-helperEnabled=false\fR in the KWin config.
 .TP
 .B enabled
-Print enabled state: true/false/(unset).
+Print the enabled state: \fBtrue\fR, \fBfalse\fR, or \fB(unset)\fR.
 .TP
 .B reconfigure
-Request KWin to reload configuration via DBus (best-effort).
-.RE
-.PP
-Integration wrapper:
-.RS
+Request KWin to reload its configuration via DBus (best-effort).
+
+.SH INTEGRATION WRAPPERS
 .TP
 .BI "wrap " CLASS " -- " COMMAND " " [ARGS...]
-Ensure CLASS is present, optionally enable+reconfigure, then exec COMMAND.
+Ensure \fICLASS\fR is present in the forced-focus list, optionally enable the
+script and reconfigure KWin, then execute \fICOMMAND\fR.
 .TP
 .BI "wrap --auto -- " COMMAND " " [ARGS...]
-Derive class name from argv[0] (e.g. echo -> EchoApp), then proceed.
+Derive a stable class name from \fIargv[0]\fR (for example,
+\fBgoogle-chrome\fR \-> \fBChromeApp\fR), then proceed as above.
 .TP
 .B wrap ... \-\-dry-run
-Print intended actions without changing config or exec.
+Print intended actions without modifying configuration or executing commands.
 .TP
 .B wrap ... \-\-no-enable
-Do not set the Plugins enabled flag.
+Do not set the plugin enabled flag.
 .TP
 .B wrap ... \-\-no-reconfigure
-Do not request KWin reconfigure.
-.RE
-.SH DESCRIPTION
-\fBfocusctl\fR manages the configuration used by the KWin script \fBkwin-focus-helper\fR.
-It edits the KWin config file \fIkwinrc\fR and maintains the key:
-.PP
-.RS
-\fB[Script-kwin-focus-helper]\fR
-.br
-\fBforceFocusClasses=...\fR
-.RE
-.PP
-Matching is case-insensitive and ignores a trailing \fI.desktop\fR.
-Stored values keep the original spelling for readability.
+Do not request a KWin reconfigure.
+
 .SH FILES
 .TP
 .I ~/.config/kwinrc
 User KWin configuration file (default target).
 .TP
 .I ~/.local/share/kwin/scripts/kwin-focus-helper/
-Per-user installed script path (typical).
+Typical per-user installation path for the KWin script.
+
+.SH NOTES
+If changes do not take effect immediately, see the
+.B TROUBLESHOOTING
+section.
+
+When run outside a graphical session (for example, over SSH without session
+environment variables), DBus-based operations such as
+.B reconfigure
+may fail.
+
+.SH TROUBLESHOOTING
+.SS Script does not appear or update in KWin
+In rare cases, KDE's service cache may become stale, particularly after manual
+file removal or repeated script installations.
+
+If the script does not appear in KWin settings or does not update after
+reinstallation, a full reset may help.
+
+.PP
+Remove the script using kpackagetool:
+.PP
+.RS
+kpackagetool6 --type=KWin/Script -r kwin-focus-helper
+.RE
+
+.PP
+Remove any remaining per-user files:
+.PP
+.RS
+rm -rf ~/.local/share/kwin/scripts/kwin-focus-helper
+.RE
+
+.PP
+Rebuild the KDE service cache (Plasma 6):
+.PP
+.RS
+rm -f ~/.cache/ksycoca6_*
+.br
+kbuildsycoca6
+.RE
+
+.PP
+After rebuilding the cache, reinstall the script and reconfigure KWin.
+
 .SH EXAMPLES
 Add a class and reload KWin:
 .PP
 .RS
 focusctl add-class google-chrome-stable
 .RE
+
 .PP
 Integration one-liner:
 .PP
 .RS
 focusctl wrap ProcletChrome -- proclet -- google-chrome-stable
 .RE
+
 .PP
-Auto class from argv[0]:
+Automatic class derivation:
 .PP
 .RS
 focusctl wrap --auto -- echo HELLO
 .RE
-.SH NOTES
-If you run \fBfocusctl\fR outside your desktop session (no DBus session),
-\fBreconfigure\fR may fail; run inside the session or use \fB--session-auto\fR.
+
 .SH SEE ALSO
 .BR kwin (1),
 .BR qdbus6 (1),
 .BR kpackagetool6 (1)
+
 .SH AUTHOR
 darko5r
+
 .SH LICENSE
 MIT
