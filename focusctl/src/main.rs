@@ -1,12 +1,8 @@
-use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 
 const GROUP_NAME: &str = "Script-kwin-focus-helper";
 const KEY_NAME: &str = "forceFocusClasses";
@@ -14,49 +10,257 @@ const KEY_NAME: &str = "forceFocusClasses";
 const SCRIPT_ID: &str = "kwin-focus-helper";
 const PLUGINS_GROUP: &str = "Plugins";
 
-// ----------------------------- user/session helpers -----------------------------
+// -------------------------------
+// Pretty output (aligned + subtle)
+// -------------------------------
 
-#[derive(Debug, Clone)]
-struct TargetUser {
+fn colors_enabled() -> bool {
+    if env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    match env::var("TERM") {
+        Ok(t) => t != "dumb",
+        Err(_) => false,
+    }
+}
+
+fn paint(s: &str, code: &str) -> String {
+    if !colors_enabled() {
+        return s.to_string();
+    }
+    format!("\x1b[{}m{}\x1b[0m", code, s)
+}
+
+fn bold(s: &str) -> String {
+    paint(s, "1")
+}
+fn dim(s: &str) -> String {
+    paint(s, "2")
+}
+fn cyan(s: &str) -> String {
+    paint(s, "36")
+}
+fn soft_red(s: &str) -> String {
+    paint(s, "31")
+}
+
+// -------------------------------------
+// Display width (no deps, pragmatic)
+// -------------------------------------
+// This is a small "good enough" width estimator for CLI alignment.
+// - Combining marks -> width 0
+// - CJK fullwidth/wide ranges -> width 2
+// - Common emoji ranges -> width 2
+// Everything else -> width 1
+//
+// This avoids .len() and keeps columns aligned even with non-ASCII text.
+fn is_combining_mark(c: char) -> bool {
+    let u = c as u32;
+    matches!(
+        u,
+        0x0300..=0x036F // Combining Diacritical Marks
+            | 0x1AB0..=0x1AFF // Combining Diacritical Marks Extended
+            | 0x1DC0..=0x1DFF // Combining Diacritical Marks Supplement
+            | 0x20D0..=0x20FF // Combining Diacritical Marks for Symbols
+            | 0xFE20..=0xFE2F // Combining Half Marks
+    )
+}
+
+fn is_wide(c: char) -> bool {
+    let u = c as u32;
+
+    // CJK, fullwidth forms, hangul, etc.
+    if matches!(
+        u,
+        0x1100..=0x115F // Hangul Jamo init
+            | 0x2329..=0x232A
+            | 0x2E80..=0xA4CF // CJK + Yi + etc (broad)
+            | 0xAC00..=0xD7A3 // Hangul syllables
+            | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+            | 0xFE10..=0xFE19
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60 // Fullwidth Forms
+            | 0xFFE0..=0xFFE6
+    ) {
+        return true;
+    }
+
+    // Common emoji blocks (not perfect, but works well for CLI)
+    matches!(
+        u,
+        0x1F300..=0x1F5FF // Misc Symbols and Pictographs
+            | 0x1F600..=0x1F64F // Emoticons
+            | 0x1F680..=0x1F6FF // Transport and Map
+            | 0x1F700..=0x1F77F // Alchemical Symbols
+            | 0x1F780..=0x1F7FF // Geometric Extended
+            | 0x1F800..=0x1F8FF // Supplemental Arrows-C
+            | 0x1F900..=0x1F9FF // Supplemental Symbols and Pictographs
+            | 0x1FA00..=0x1FAFF // Symbols and Pictographs Extended-A
+            | 0x2600..=0x26FF // Misc symbols
+            | 0x2700..=0x27BF // Dingbats
+    )
+}
+
+fn display_width(s: &str) -> usize {
+    let mut w = 0usize;
+    for c in s.chars() {
+        if c == '\n' || c == '\r' || c == '\t' {
+            // treat controls as 1 cell (safe for help formatting)
+            w += 1;
+            continue;
+        }
+        if is_combining_mark(c) {
+            continue;
+        }
+        if is_wide(c) {
+            w += 2;
+        } else {
+            w += 1;
+        }
+    }
+    w
+}
+
+// Pad the *plain* left column to `w` display cells, then optionally color it.
+// Alignment remains correct regardless of ANSI codes (padding happens before coloring).
+fn col_left(plain: &str, w: usize, color_code: Option<&str>) -> String {
+    let mut s = plain.to_string();
+    let cur = display_width(&s);
+    if cur < w {
+        s.push_str(&" ".repeat(w - cur));
+    }
+    match color_code {
+        Some(code) => paint(&s, code),
+        None => s,
+    }
+}
+
+fn line2(w: usize, left_plain: &str, left_color: Option<&str>, right: &str, right_dim: bool) {
+    let left = col_left(left_plain, w, left_color);
+    let right = if right_dim { dim(right) } else { right.to_string() };
+    eprintln!("  {}  {}", left, right);
+}
+
+fn section(title: &str) {
+    // Use cyan for the section title for a subtle 2nd tone.
+    eprintln!("{}", cyan(&bold(title)));
+}
+
+fn info(msg: &str) {
+    eprintln!("{} {}", dim("focusctl:"), msg);
+}
+fn err(msg: &str) {
+    eprintln!("{} {}", soft_red("focusctl:"), msg);
+}
+
+fn usage() {
+    const W: usize = 34;
+
+    eprintln!("{}", bold("kwin-focus-helper / focusctl"));
+    eprintln!();
+
+    section("Global options:");
+    line2(W, "--uid <uid>", Some("36"), "Target this uid's KWin config/session", true);
+    line2(W, "--user <name>", Some("36"), "Target this user's KWin config/session", true);
+    line2(
+        W,
+        "--session-auto",
+        Some("36"),
+        "Auto-detect active graphical session user (root-friendly)",
+        true,
+    );
+    eprintln!();
+
+    section("Commands:");
+    line2(
+        W,
+        "list-classes [--keys|-k]",
+        Some("36"),
+        "List stored classes (optional: show match keys)",
+        true,
+    );
+    line2(W, "list-keys", Some("36"), "Show stored value -> normalized match key", true);
+    line2(
+        W,
+        "add-class <window-class>",
+        Some("36"),
+        "Add class (spelling preserved, matching normalized)",
+        true,
+    );
+    line2(
+        W,
+        "remove-class <window-class>",
+        Some("36"),
+        "Remove by match key (case-insensitive, strips .desktop)",
+        true,
+    );
+    line2(
+        W,
+        "set-classes <c1;c2;c3>",
+        Some("36"),
+        "Replace entire list (separators: ';' ',' whitespace)",
+        true,
+    );
+    line2(W, "clear", Some("36"), "Clear all configured classes", true);
+    line2(W, "enable", Some("36"), "Set [Plugins] kwin-focus-helperEnabled=true", true);
+    line2(W, "disable", Some("36"), "Set [Plugins] kwin-focus-helperEnabled=false", true);
+    line2(W, "enabled", Some("36"), "Print enabled state: true/false/(unset)", true);
+    line2(
+        W,
+        "reconfigure",
+        Some("36"),
+        "Request org.kde.KWin /KWin reconfigure (best-effort)",
+        true,
+    );
+    eprintln!();
+
+    section("Integration wrappers:");
+    line2(
+        W,
+        "wrap <ClassName> -- <cmd...>",
+        Some("36"),
+        "Ensure class exists + (optional) enable/reconfigure, then exec",
+        true,
+    );
+    line2(
+        W,
+        "wrap --auto -- <cmd...>",
+        Some("36"),
+        "Auto class name from argv[0] (example: echo -> EchoApp)",
+        true,
+    );
+    line2(W, "wrap ... [--dry-run]", Some("36"), "Print actions only (no changes, no exec)", true);
+    line2(W, "wrap ... [--no-enable]", Some("36"), "Do not set plugin enabled flag", true);
+    line2(
+        W,
+        "wrap ... [--no-reconfigure]",
+        Some("36"),
+        "Do not request KWin reconfigure",
+        true,
+    );
+    eprintln!();
+
+    section("Notes:");
+    eprintln!("  {}", dim("• Matching is case-insensitive and ignores trailing '.desktop'."));
+    eprintln!("  {}", dim("• Stored/display names preserve your spelling (e.g. ProcletChrome)."));
+    eprintln!("  {}", dim("• Set NO_COLOR=1 to disable colors."));
+}
+
+// -------------------------------
+// Target selection (uid/user/auto)
+// -------------------------------
+
+#[derive(Clone, Debug)]
+struct Target {
     uid: u32,
-    gid: u32,
-    username: String,
+    user: String,
     home: PathBuf,
 }
 
-#[derive(Debug, Clone, Default)]
-struct SessionEnv {
-    xdg_runtime_dir: Option<String>,
-    dbus_session_bus_address: Option<String>,
-    display: Option<String>,
-    wayland_display: Option<String>,
-    xauthority: Option<String>,
-    session_type: Option<String>, // "x11" or "wayland"
-}
-
-fn is_root() -> bool {
-    matches!(current_euid(), Ok(0))
-}
-
-/// Current effective uid without libc (via `id -u`).
-fn current_euid() -> io::Result<u32> {
-    let out = Command::new("id")
-        .args(["-u"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()?;
-    if !out.status.success() {
-        return Err(io::Error::new(io::ErrorKind::Other, "id -u failed"));
-    }
-    let s = String::from_utf8_lossy(&out.stdout);
-    s.trim()
-        .parse::<u32>()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "id -u parse failed"))
-}
-
-fn user_by_uid(uid: u32) -> io::Result<TargetUser> {
-    let passwd = fs::read_to_string("/etc/passwd")?;
-    for line in passwd.lines() {
+fn parse_passwd() -> io::Result<Vec<(String, u32, PathBuf)>> {
+    let s = fs::read_to_string("/etc/passwd")?;
+    let mut out = Vec::new();
+    for line in s.lines() {
         if line.trim().is_empty() || line.starts_with('#') {
             continue;
         }
@@ -65,288 +269,89 @@ fn user_by_uid(uid: u32) -> io::Result<TargetUser> {
         if parts.len() < 7 {
             continue;
         }
-        let p_uid: u32 = match parts[2].parse() {
+        let name = parts[0].to_string();
+        let uid: u32 = match parts[2].parse() {
             Ok(x) => x,
             Err(_) => continue,
         };
-        if p_uid == uid {
-            let gid: u32 = parts[3].parse().unwrap_or(0);
-            let name = parts[0].to_string();
-            let home = PathBuf::from(parts[5]);
-            return Ok(TargetUser {
-                uid,
-                gid,
-                username: name,
-                home,
-            });
-        }
+        let home = PathBuf::from(parts[5]);
+        out.push((name, uid, home));
     }
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!("uid {} not found in /etc/passwd", uid),
-    ))
+    Ok(out)
 }
 
-fn user_by_name(name: &str) -> io::Result<TargetUser> {
-    let passwd = fs::read_to_string("/etc/passwd")?;
-    for line in passwd.lines() {
-        if line.trim().is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let parts: Vec<&str> = line.split(':').collect();
-        if parts.len() < 7 {
-            continue;
-        }
-        if parts[0] == name {
-            let uid: u32 = parts[2].parse().unwrap_or(0);
-            let gid: u32 = parts[3].parse().unwrap_or(0);
-            let home = PathBuf::from(parts[5]);
-            return Ok(TargetUser {
-                uid,
-                gid,
-                username: name.to_string(),
-                home,
-            });
+fn find_user_by_name(name: &str) -> io::Result<Option<Target>> {
+    for (n, uid, home) in parse_passwd()? {
+        if n == name {
+            return Ok(Some(Target { uid, user: n, home }));
         }
     }
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!("user '{}' not found in /etc/passwd", name),
-    ))
+    Ok(None)
 }
 
-fn loginctl_show(session_id: &str, prop: &str) -> io::Result<String> {
-    let out = Command::new("loginctl")
-        .args(["show-session", session_id, "-p", prop, "--value"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()?;
-
-    if !out.status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("loginctl show-session {} {} failed", session_id, prop),
-        ));
+fn find_user_by_uid(uid: u32) -> io::Result<Option<Target>> {
+    for (n, u, home) in parse_passwd()? {
+        if u == uid {
+            return Ok(Some(Target { uid: u, user: n, home }));
+        }
     }
-
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(None)
 }
 
-/// Detect active graphical session UID (Active=yes, Class=user, Type=x11|wayland).
-fn detect_active_graphical_uid() -> io::Result<u32> {
-    let out = Command::new("loginctl")
-        .args(["list-sessions", "--no-legend"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()?;
-
-    if !out.status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "loginctl list-sessions failed",
-        ));
-    }
-
-    let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines() {
-        let sid = line.split_whitespace().next().unwrap_or("");
-        if sid.is_empty() {
-            continue;
-        }
-
-        let active = loginctl_show(sid, "Active").unwrap_or_default();
-        if active.trim() != "yes" {
-            continue;
-        }
-
-        let class = loginctl_show(sid, "Class").unwrap_or_default();
-        if class.trim() != "user" {
-            continue;
-        }
-
-        let stype = loginctl_show(sid, "Type").unwrap_or_default();
-        let stype = stype.trim();
-        if stype != "x11" && stype != "wayland" {
-            continue;
-        }
-
-        let uid_s = loginctl_show(sid, "User").unwrap_or_default();
-        if let Ok(uid) = uid_s.trim().parse::<u32>() {
-            return Ok(uid);
+// Best-effort "who am I" without libc.
+fn current_uid() -> u32 {
+    if let Ok(u) = env::var("UID") {
+        if let Ok(x) = u.parse::<u32>() {
+            return x;
         }
     }
-
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        "no active graphical user session detected",
-    ))
-}
-
-/// Detect active session id for a uid (must be Active=yes, Class=user, Type=x11|wayland).
-fn detect_session_id_for_uid(uid: u32) -> io::Result<String> {
-    let out = Command::new("loginctl")
-        .args(["list-sessions", "--no-legend"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()?;
-
-    if !out.status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "loginctl list-sessions failed",
-        ));
-    }
-
-    let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines() {
-        let sid = line.split_whitespace().next().unwrap_or("");
-        if sid.is_empty() {
-            continue;
-        }
-
-        let s_uid = loginctl_show(sid, "User").unwrap_or_default();
-        let s_uid: u32 = match s_uid.trim().parse() {
-            Ok(x) => x,
-            Err(_) => continue,
-        };
-        if s_uid != uid {
-            continue;
-        }
-
-        let active = loginctl_show(sid, "Active").unwrap_or_default();
-        if active.trim() != "yes" {
-            continue;
-        }
-
-        let class = loginctl_show(sid, "Class").unwrap_or_default();
-        if class.trim() != "user" {
-            continue;
-        }
-
-        let stype = loginctl_show(sid, "Type").unwrap_or_default();
-        let stype = stype.trim();
-        if stype != "x11" && stype != "wayland" {
-            continue;
-        }
-
-        return Ok(sid.to_string());
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!("no active graphical session found for uid {}", uid),
-    ))
-}
-
-/// If you're already inside a session, prefer env variables rather than loginctl guessing.
-fn session_env_from_current_process() -> Option<SessionEnv> {
-    let xdg = env::var("XDG_RUNTIME_DIR").ok().filter(|s| !s.is_empty());
-    let dbus = env::var("DBUS_SESSION_BUS_ADDRESS").ok().filter(|s| !s.is_empty());
-
-    if xdg.is_none() && dbus.is_none() {
-        return None;
-    }
-
-    let stype = env::var("XDG_SESSION_TYPE").ok().filter(|s| !s.is_empty());
-    let display = env::var("DISPLAY").ok().filter(|s| !s.is_empty());
-    let wdisp = env::var("WAYLAND_DISPLAY").ok().filter(|s| !s.is_empty());
-    let xauth = env::var("XAUTHORITY").ok().filter(|s| !s.is_empty());
-
-    Some(SessionEnv {
-        xdg_runtime_dir: xdg,
-        dbus_session_bus_address: dbus,
-        display,
-        wayland_display: wdisp,
-        xauthority: xauth,
-        session_type: stype,
-    })
-}
-
-fn run_user_dir(uid: u32) -> PathBuf {
-    PathBuf::from("/run/user").join(uid.to_string())
-}
-
-fn session_env_for_uid(uid: u32, user_home: &Path) -> io::Result<SessionEnv> {
-    // If /run/user/<uid> doesn't exist, there is no real logind user runtime.
-    let rundir = run_user_dir(uid);
-    if !rundir.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("{} does not exist (no user session?)", rundir.display()),
-        ));
-    }
-
-    let sid = detect_session_id_for_uid(uid)?;
-    let xdg = loginctl_show(&sid, "XDG_RUNTIME_DIR").ok();
-    let dbus = loginctl_show(&sid, "DBUS_SESSION_BUS_ADDRESS").ok();
-    let stype = loginctl_show(&sid, "Type").ok(); // x11/wayland
-
-    let stype_s = stype.clone().unwrap_or_default();
-
-    // Auto-detect WAYLAND_DISPLAY if Wayland: first wayland-* socket present.
-    let mut wayland_display: Option<String> = None;
-    if stype_s.trim() == "wayland" {
-        if let Ok(rd) = fs::read_dir(&rundir) {
-            for ent in rd.flatten() {
-                if let Some(name) = ent.file_name().to_str().map(|s| s.to_string()) {
-                    if name.starts_with("wayland-") {
-                        wayland_display = Some(name);
-                        break;
-                    }
+    if let Ok(out) = Command::new("id").arg("-u").output() {
+        if out.status.success() {
+            if let Ok(s) = String::from_utf8(out.stdout) {
+                if let Ok(x) = s.trim().parse::<u32>() {
+                    return x;
                 }
             }
         }
-        if wayland_display.is_none() {
-            // Fallback guess
-            wayland_display = Some("wayland-0".to_string());
-        }
     }
-
-    // Auto-detect DISPLAY for X11: :0 default.
-    let display = if stype_s.trim() == "x11" {
-        Some(":0".to_string())
-    } else {
-        None
-    };
-
-    let xauth = if stype_s.trim() == "x11" {
-        Some(user_home.join(".Xauthority").to_string_lossy().to_string())
-    } else {
-        None
-    };
-
-    Ok(SessionEnv {
-        xdg_runtime_dir: xdg.filter(|s| !s.is_empty()),
-        dbus_session_bus_address: dbus.filter(|s| !s.is_empty()),
-        display,
-        wayland_display,
-        xauthority: xauth,
-        session_type: stype.filter(|s| !s.is_empty()),
-    })
+    0
 }
 
-fn apply_session_env(cmd: &mut Command, sess: &SessionEnv) {
-    if let Some(x) = &sess.xdg_runtime_dir {
-        cmd.env("XDG_RUNTIME_DIR", x);
-    }
-    if let Some(x) = &sess.dbus_session_bus_address {
-        cmd.env("DBUS_SESSION_BUS_ADDRESS", x);
-    }
-    if let Some(x) = &sess.session_type {
-        cmd.env("XDG_SESSION_TYPE", x);
-    }
-    if let Some(x) = &sess.display {
-        cmd.env("DISPLAY", x);
-    }
-    if let Some(x) = &sess.wayland_display {
-        cmd.env("WAYLAND_DISPLAY", x);
-    }
-    if let Some(x) = &sess.xauthority {
-        cmd.env("XAUTHORITY", x);
-    }
+fn current_user() -> String {
+    env::var("USER").unwrap_or_else(|_| "unknown".to_string())
 }
 
-// ----------------------------- class matching helpers -----------------------------
+fn current_home() -> PathBuf {
+    env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+}
+
+// -------------------------------
+// KWin config path + IO
+// -------------------------------
+
+fn config_path_for(target: &Target) -> PathBuf {
+    // For a different user we can't reliably know XDG_CONFIG_HOME; assume ~/.config.
+    target.home.join(".config").join("kwinrc")
+}
+
+fn read_kwinrc(target: &Target) -> io::Result<String> {
+    fs::read_to_string(config_path_for(target))
+}
+
+fn atomic_write(path: &Path, contents: &str) -> io::Result<()> {
+    let tmp = path.with_extension("tmp.kwin-focus-helper");
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()?;
+    }
+    fs::rename(tmp, path)?;
+    Ok(())
+}
+
+// -------------------------------
+// Parsing + normalization
+// -------------------------------
 
 fn class_key(s: &str) -> String {
     let s = s.trim();
@@ -370,24 +375,6 @@ fn join_classes(classes: &[String]) -> String {
     classes.join(";")
 }
 
-fn dedupe_by_key_keep_first(v: Vec<String>) -> Vec<String> {
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut out: Vec<String> = Vec::new();
-
-    for s in v {
-        let k = class_key(&s);
-        if k.is_empty() {
-            continue;
-        }
-        if seen.insert(k) {
-            out.push(s);
-        }
-    }
-    out
-}
-
-// ----------------------------- kwinrc parsing -----------------------------
-
 #[derive(Debug)]
 struct ScriptConfig {
     group_header_index: Option<usize>,
@@ -395,6 +382,7 @@ struct ScriptConfig {
     value: String,
 }
 
+/// Finds `[Script-kwin-focus-helper]` group and `forceFocusClasses=...` within it.
 fn extract_script_config(lines: &[String]) -> ScriptConfig {
     let target_header = format!("[{}]", GROUP_NAME);
     let mut in_group = false;
@@ -432,6 +420,7 @@ fn extract_script_config(lines: &[String]) -> ScriptConfig {
     }
 }
 
+/// Finds `[Plugins]` and `kwin-focus-helperEnabled=...` within it.
 fn extract_plugins_enabled(lines: &[String]) -> (Option<usize>, Option<usize>, Option<bool>) {
     let header = format!("[{}]", PLUGINS_GROUP);
     let key = format!("{}Enabled", SCRIPT_ID);
@@ -467,29 +456,194 @@ fn extract_plugins_enabled(lines: &[String]) -> (Option<usize>, Option<usize>, O
     (group_header_index, value_line_index, enabled)
 }
 
-// ----------------------------- kwinrc IO -----------------------------
+// -------------------------------
+// KWin DBus reconfigure (root-friendly target)
+// -------------------------------
 
-fn config_path_for(user: &TargetUser) -> PathBuf {
-    user.home.join(".config/kwinrc")
+fn have_cmd(name: &str) -> bool {
+    Command::new("sh")
+        .arg("-lc")
+        .arg(format!("command -v {} >/dev/null 2>&1", name))
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
-fn read_kwinrc_for(user: &TargetUser) -> io::Result<String> {
-    fs::read_to_string(config_path_for(user))
-}
-
-fn atomic_write(path: &Path, contents: &str) -> io::Result<()> {
-    let tmp = path.with_extension("tmp.kwin-focus-helper");
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(contents.as_bytes())?;
-        f.sync_all()?;
+/// Find active graphical session env for a target uid:
+/// returns (XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS)
+fn detect_session_env_for_uid(uid: u32) -> io::Result<Option<(String, String)>> {
+    if !have_cmd("loginctl") {
+        return Ok(None);
     }
-    fs::rename(tmp, path)?;
-    Ok(())
+
+    let out = Command::new("loginctl")
+        .args(["list-sessions", "--no-legend"])
+        .output()?;
+
+    if !out.status.success() {
+        return Ok(None);
+    }
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let sid = match line.split_whitespace().next() {
+            Some(x) => x,
+            None => continue,
+        };
+
+        // Active?
+        let active = Command::new("loginctl")
+            .args(["show-session", sid, "-p", "Active", "--value"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if active != "yes" {
+            continue;
+        }
+
+        // Class user?
+        let class = Command::new("loginctl")
+            .args(["show-session", sid, "-p", "Class", "--value"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if class != "user" {
+            continue;
+        }
+
+        // Type wayland/x11?
+        let ty = Command::new("loginctl")
+            .args(["show-session", sid, "-p", "Type", "--value"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if ty != "wayland" && ty != "x11" {
+            continue;
+        }
+
+        // State active/online?
+        let state = Command::new("loginctl")
+            .args(["show-session", sid, "-p", "State", "--value"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if state != "active" && state != "online" {
+            continue;
+        }
+
+        // User uid?
+        let user_uid = Command::new("loginctl")
+            .args(["show-session", sid, "-p", "User", "--value"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let session_uid: u32 = match user_uid.parse() {
+            Ok(x) => x,
+            Err(_) => continue,
+        };
+
+        if session_uid != uid {
+            continue;
+        }
+
+        let xdg = Command::new("loginctl")
+            .args(["show-session", sid, "-p", "XDG_RUNTIME_DIR", "--value"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+
+        let dbus = Command::new("loginctl")
+            .args(["show-session", sid, "-p", "DBUS_SESSION_BUS_ADDRESS", "--value"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+
+        if !xdg.is_empty() && !dbus.is_empty() {
+            return Ok(Some((xdg, dbus)));
+        }
+    }
+
+    Ok(None)
 }
 
-fn get_classes_for(user: &TargetUser) -> io::Result<Vec<String>> {
-    let contents = read_kwinrc_for(user)?;
+fn run_as_target(target: &Target, mut cmd: Command) -> io::Result<std::process::ExitStatus> {
+    let self_uid = current_uid();
+    if self_uid == 0 && target.uid != 0 && have_cmd("sudo") {
+        let mut sudo = Command::new("sudo");
+        sudo.arg("-u").arg(format!("#{}", target.uid)).arg("-H");
+        let prog = cmd.get_program().to_os_string();
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_os_string()).collect();
+        sudo.arg(prog);
+        for a in args {
+            sudo.arg(a);
+        }
+        sudo.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        return sudo.status();
+    }
+
+    cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    cmd.status()
+}
+
+fn reload_kwin_config(target: &Target) {
+    let cmds: &[(&str, [&str; 3])] = &[
+        ("qdbus6", ["org.kde.KWin", "/KWin", "reconfigure"]),
+        ("qdbus-qt6", ["org.kde.KWin", "/KWin", "reconfigure"]),
+        ("qdbus-qt5", ["org.kde.KWin", "/KWin", "reconfigure"]),
+        ("qdbus", ["org.kde.KWin", "/KWin", "reconfigure"]),
+    ];
+
+    let mut session_env: Option<(String, String)> = None;
+    if let Ok(Some((xdg, dbus))) = detect_session_env_for_uid(target.uid) {
+        session_env = Some((xdg, dbus));
+    }
+
+    for (prog, args) in cmds {
+        if !have_cmd(prog) {
+            continue;
+        }
+
+        let mut c = Command::new(prog);
+        c.args(args);
+
+        if let Some((ref xdg, ref dbus)) = session_env {
+            c.env("XDG_RUNTIME_DIR", xdg);
+            c.env("DBUS_SESSION_BUS_ADDRESS", dbus);
+        }
+
+        match run_as_target(target, c) {
+            Ok(st) if st.success() => {
+                info(&format!("requested KWin reconfigure via {}", prog));
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    err("could not call qdbus/qdbus6; you may need to run manually:");
+    eprintln!("\tqdbus org.kde.KWin /KWin reconfigure");
+}
+
+// -------------------------------
+// Config operations
+// -------------------------------
+
+fn get_classes(target: &Target) -> io::Result<Vec<String>> {
+    let contents = read_kwinrc(target).unwrap_or_default();
     let lines: Vec<String> = contents.lines().map(|s| s.to_string()).collect();
     let cfg = extract_script_config(&lines);
 
@@ -497,12 +651,12 @@ fn get_classes_for(user: &TargetUser) -> io::Result<Vec<String>> {
         return Ok(Vec::new());
     }
 
-    Ok(dedupe_by_key_keep_first(parse_classes(&cfg.value)))
+    Ok(parse_classes(&cfg.value))
 }
 
-fn set_classes_for(user: &TargetUser, new_classes: &[String]) -> io::Result<()> {
-    let path = config_path_for(user);
-    let contents = read_kwinrc_for(user).unwrap_or_default();
+fn set_classes(target: &Target, new_classes: &[String], do_reconfigure: bool) -> io::Result<()> {
+    let path = config_path_for(target);
+    let contents = read_kwinrc(target).unwrap_or_default();
 
     let mut lines: Vec<String> = if contents.is_empty() {
         Vec::new()
@@ -534,19 +688,24 @@ fn set_classes_for(user: &TargetUser, new_classes: &[String]) -> io::Result<()> 
     }
 
     atomic_write(&path, &out)?;
+
+    if do_reconfigure {
+        reload_kwin_config(target);
+    }
+
     Ok(())
 }
 
-fn get_enabled_for(user: &TargetUser) -> io::Result<Option<bool>> {
-    let contents = read_kwinrc_for(user)?;
+fn get_enabled(target: &Target) -> io::Result<Option<bool>> {
+    let contents = read_kwinrc(target).unwrap_or_default();
     let lines: Vec<String> = contents.lines().map(|s| s.to_string()).collect();
     let (_hdr, _val, enabled) = extract_plugins_enabled(&lines);
     Ok(enabled)
 }
 
-fn set_enabled_for(user: &TargetUser, enabled: bool) -> io::Result<()> {
-    let path = config_path_for(user);
-    let contents = read_kwinrc_for(user).unwrap_or_default();
+fn set_enabled(target: &Target, enabled: bool, do_reconfigure: bool) -> io::Result<()> {
+    let path = config_path_for(target);
+    let contents = read_kwinrc(target).unwrap_or_default();
 
     let mut lines: Vec<String> = if contents.is_empty() {
         Vec::new()
@@ -578,354 +737,121 @@ fn set_enabled_for(user: &TargetUser, enabled: bool) -> io::Result<()> {
     }
 
     atomic_write(&path, &out)?;
+
+    if do_reconfigure {
+        reload_kwin_config(target);
+    }
+
     Ok(())
 }
 
-// ----------------------------- KWin reconfigure -----------------------------
+// -------------------------------
+// Wrapper: auto class naming
+// -------------------------------
 
-fn reload_kwin_config_with_env(sess: &SessionEnv) {
-    let cmds: &[(&str, [&str; 3])] = &[
-        ("qdbus6", ["org.kde.KWin", "/KWin", "reconfigure"]),
-        ("qdbus-qt6", ["org.kde.KWin", "/KWin", "reconfigure"]),
-        ("qdbus-qt5", ["org.kde.KWin", "/KWin", "reconfigure"]),
-        ("qdbus", ["org.kde.KWin", "/KWin", "reconfigure"]),
-    ];
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
 
-    for (prog, args) in cmds {
-        let mut c = Command::new(prog);
-        c.args(args);
-        apply_session_env(&mut c, sess);
+fn auto_class_from_argv0(argv0: &str) -> String {
+    let base = basename(argv0);
+    let base = base.strip_suffix(".desktop").unwrap_or(base);
+    let base = base.strip_suffix(".sh").unwrap_or(base);
 
-        if let Ok(status) = c.status() {
-            if status.success() {
-                eprintln!("focusctl: requested KWin reconfigure via {}", prog);
-                return;
-            }
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    for ch in base.chars() {
+        if ch.is_ascii_alphanumeric() {
+            cur.push(ch);
+        } else if !cur.is_empty() {
+            words.push(cur.clone());
+            cur.clear();
         }
     }
-
-    eprintln!(
-        "focusctl: could not call qdbus/qdbus6; run manually inside session:\n\
-         \tqdbus org.kde.KWin /KWin reconfigure"
-    );
-}
-
-// ----------------------------- UX helpers -----------------------------
-
-fn print_class_keys(classes: Vec<String>) {
-    if classes.is_empty() {
-        println!("(no forced classes configured)");
-        return;
-    }
-    for c in classes {
-        println!("{:<24} -> {}", c, class_key(&c));
-    }
-}
-
-fn usage() {
-    eprintln!("kwin-focus-helper / focusctl");
-    eprintln!();
-    eprintln!("Global options:");
-    eprintln!("  --uid <uid>        Target this uid's KWin config/session");
-    eprintln!("  --user <name>      Target this user's KWin config/session");
-    eprintln!("  --session-auto     Auto-detect active graphical session user (root-friendly)");
-    eprintln!();
-    eprintln!("Commands:");
-    eprintln!("  focusctl list-classes [--keys|-k]");
-    eprintln!("  focusctl list-keys");
-    eprintln!("  focusctl add-class <window-class>");
-    eprintln!("  focusctl remove-class <window-class>");
-    eprintln!("  focusctl set-classes <c1;c2;c3>");
-    eprintln!("  focusctl clear");
-    eprintln!("  focusctl enable");
-    eprintln!("  focusctl disable");
-    eprintln!("  focusctl enabled");
-    eprintln!("  focusctl reconfigure");
-    eprintln!();
-    eprintln!("Integration wrappers:");
-    eprintln!("  focusctl wrap <ClassName>|--auto [--dry-run] [--no-enable] [--no-reconfigure] -- <command...>");
-    eprintln!("Notes:");
-    eprintln!("  - Matching is case-insensitive and ignores trailing '.desktop'.");
-    eprintln!("  - Stored/display names preserve your spelling (e.g. ProcletChrome).");
-    eprintln!("  - list-keys shows stored value -> normalized match key.");
-}
-
-fn split_double_dash(args: &[String]) -> (Vec<String>, Vec<String>) {
-    if let Some(pos) = args.iter().position(|s| s == "--") {
-        (args[..pos].to_vec(), args[pos + 1..].to_vec())
-    } else {
-        (args.to_vec(), Vec::new())
-    }
-}
-
-fn auto_class_from_cmd(cmd0: &str) -> String {
-    let base = Path::new(cmd0)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(cmd0);
-
-    let s = base
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect::<String>();
-
-    if s.is_empty() {
-        return "FocusApp".to_string();
+    if !cur.is_empty() {
+        words.push(cur);
     }
 
+    if words.is_empty() {
+        return "App".to_string();
+    }
+
+    // echo -> EchoApp
     let mut out = String::new();
-    let mut it = s.chars();
-    if let Some(first) = it.next() {
-        out.push(first.to_ascii_uppercase());
-        out.push_str(it.as_str());
+    let first = &words[0];
+    let mut chars = first.chars();
+    if let Some(c0) = chars.next() {
+        out.push(c0.to_ascii_uppercase());
+        for c in chars {
+            out.push(c.to_ascii_lowercase());
+        }
     }
     out.push_str("App");
     out
 }
 
-/// Decide target user.
-/// Priority:
-/// 1) explicit --uid / --user
-/// 2) if root and --session-auto => active graphical uid
-/// 3) otherwise current uid
-fn resolve_target_user(
-    explicit_uid: Option<u32>,
-    explicit_user: Option<String>,
-    session_auto: bool,
-) -> io::Result<TargetUser> {
-    if let Some(u) = explicit_uid {
-        return user_by_uid(u);
-    }
-    if let Some(name) = explicit_user {
-        return user_by_name(&name);
-    }
+// -------------------------------
+// Exec helper
+// -------------------------------
 
-    if session_auto && is_root() {
-        let uid = detect_active_graphical_uid()?;
-        return user_by_uid(uid);
-    }
-
-    let uid = current_euid()?;
-    user_by_uid(uid)
+#[cfg(unix)]
+fn exec_replace(mut cmd: Command) -> io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    let e = cmd.exec(); // only returns on error
+    Err(e)
 }
 
-/// Choose session env:
-/// 1) if current process already has session env -> use it (best when running inside desktop)
-/// 2) else use loginctl-based session env for target uid
-fn resolve_session_env(target: &TargetUser) -> io::Result<SessionEnv> {
-    if let Some(sess) = session_env_from_current_process() {
-        return Ok(sess);
-    }
-    session_env_for_uid(target.uid, &target.home)
-}
-
-// ----------------------------- wrapper logic -----------------------------
-
-fn ensure_integration(
-    user: &TargetUser,
-    sess: &SessionEnv,
-    class_name: &str,
-    no_enable: bool,
-    no_reconf: bool,
-) -> io::Result<()> {
-    if !no_enable {
-        let _ = set_enabled_for(user, true);
-    }
-
-    let input = class_name.trim().to_string();
-    let ikey = class_key(&input);
-    if ikey.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "class is empty"));
-    }
-
-    let mut classes = get_classes_for(user).unwrap_or_default();
-    let exists = classes.iter().any(|c| class_key(c) == ikey);
-    if !exists {
-        classes.push(input);
-        classes = dedupe_by_key_keep_first(classes);
-        set_classes_for(user, &classes)?;
-    }
-
-    if !no_reconf {
-        reload_kwin_config_with_env(sess);
-    }
-
-    Ok(())
-}
-
-fn exec_command_as(
-    user: &TargetUser,
-    sess: &SessionEnv,
-    cmdv: &[String],
-) -> io::Result<()> {
-    if cmdv.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "missing command after --"));
-    }
-
-    let mut c = Command::new(&cmdv[0]);
-    if cmdv.len() > 1 {
-        c.args(&cmdv[1..]);
-    }
-
-    c.current_dir(&user.home);
-    c.env("HOME", &user.home);
-    apply_session_env(&mut c, sess);
-
-    // If root and target user is not root, drop privileges for GUI launch.
-    if cfg!(unix) && is_root() && user.uid != 0 {
-        c.uid(user.uid);
-        c.gid(user.gid);
-    }
-
-    #[cfg(unix)]
-    {
-        let err = c.exec();
-        Err(err)
-    }
-
-    #[cfg(not(unix))]
-    {
-        let status = c.status()?;
-        let code = status.code().unwrap_or(1);
-        std::process::exit(code);
-    }
-}
-
-fn handle_wrap(
-    argv: Vec<String>,
-    explicit_uid: Option<u32>,
-    explicit_user: Option<String>,
-    session_auto: bool,
-) {
-    let (left, right_cmd) = split_double_dash(&argv);
-
-    if right_cmd.is_empty() {
-        eprintln!("focusctl: wrap requires '-- <command...>'");
-        usage();
-        return;
-    }
-
-    let mut dry_run = false;
-    let mut no_enable = false;
-    let mut no_reconf = false;
-    let mut auto = false;
-    let mut class_name: Option<String> = None;
-
-    let mut i = 0;
-    while i < left.len() {
-        match left[i].as_str() {
-            "--dry-run" => {
-                dry_run = true;
-                i += 1;
-            }
-            "--no-enable" => {
-                no_enable = true;
-                i += 1;
-            }
-            "--no-reconfigure" => {
-                no_reconf = true;
-                i += 1;
-            }
-            "--auto" => {
-                auto = true;
-                i += 1;
-            }
-            x if !x.starts_with('-') && class_name.is_none() && !auto => {
-                class_name = Some(left[i].clone());
-                i += 1;
-            }
-            _ => {
-                eprintln!("focusctl: unknown wrap option/arg: {}", left[i]);
-                return;
-            }
-        }
-    }
-
-    let class = if auto {
-        auto_class_from_cmd(&right_cmd[0])
+#[cfg(not(unix))]
+fn exec_replace(mut cmd: Command) -> io::Result<()> {
+    let st = cmd.status()?;
+    if st.success() {
+        Ok(())
     } else {
-        match class_name {
-            Some(c) => c,
-            None => {
-                eprintln!("focusctl: wrap requires <ClassName> or --auto");
-                return;
-            }
-        }
-    };
-
-    let user = match resolve_target_user(explicit_uid, explicit_user, session_auto) {
-        Ok(u) => u,
-        Err(e) => {
-            eprintln!("focusctl: failed to resolve target user: {}", e);
-            return;
-        }
-    };
-
-    let sess = match resolve_session_env(&user) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!(
-                "focusctl: failed to resolve session env for uid {} ({}): {}",
-                user.uid, user.username, e
-            );
-            eprintln!("hint: target uid must have an active graphical session (check /run/user/<uid>).");
-            return;
-        }
-    };
-
-    if dry_run {
-        eprintln!("focusctl: [dry-run] target user: {} (uid={})", user.username, user.uid);
-        eprintln!("focusctl: [dry-run] class: {}", class);
-        eprintln!("focusctl: [dry-run] session env: {:?}", sess);
-        eprintln!("focusctl: [dry-run] exec: {:?}", right_cmd);
-        return;
-    }
-
-    if let Err(e) = ensure_integration(&user, &sess, &class, no_enable, no_reconf) {
-        eprintln!("focusctl: failed to ensure integration: {}", e);
-        return;
-    }
-
-    if let Err(e) = exec_command_as(&user, &sess, &right_cmd) {
-        eprintln!("focusctl: exec failed: {}", e);
-        std::process::exit(127);
+        Err(io::Error::new(io::ErrorKind::Other, format!("exit: {}", st)))
     }
 }
 
-// ----------------------------- command handling -----------------------------
+// -------------------------------
+// Main
+// -------------------------------
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        usage();
-        return;
-    }
+    let _prog = args.get(0).cloned().unwrap_or_else(|| "focusctl".to_string());
 
-    // Global options (must be before command)
-    let mut explicit_uid: Option<u32> = None;
-    let mut explicit_user: Option<String> = None;
+    // Parse global options
+    let mut i = 1usize;
+    let mut target_uid: Option<u32> = None;
+    let mut target_user: Option<String> = None;
     let mut session_auto = false;
 
-    let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--uid" => {
-                let v = args.get(i + 1).cloned();
-                if v.is_none() {
-                    eprintln!("focusctl: --uid requires a value");
+                i += 1;
+                if i >= args.len() {
+                    err("--uid requires a value");
+                    usage();
                     return;
                 }
-                explicit_uid = v.unwrap().parse::<u32>().ok();
-                i += 2;
+                match args[i].parse::<u32>() {
+                    Ok(x) => target_uid = Some(x),
+                    Err(_) => {
+                        err("invalid uid");
+                        return;
+                    }
+                }
+                i += 1;
             }
             "--user" => {
-                let v = args.get(i + 1).cloned();
-                if v.is_none() {
-                    eprintln!("focusctl: --user requires a value");
+                i += 1;
+                if i >= args.len() {
+                    err("--user requires a value");
+                    usage();
                     return;
                 }
-                explicit_user = Some(v.unwrap());
-                i += 2;
+                target_user = Some(args[i].clone());
+                i += 1;
             }
             "--session-auto" => {
                 session_auto = true;
@@ -939,46 +865,184 @@ fn main() {
         }
     }
 
+    // Determine target user
+    let target: Target = if let Some(name) = target_user.clone() {
+        match find_user_by_name(&name) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                err(&format!("unknown user: {}", name));
+                return;
+            }
+            Err(e) => {
+                err(&format!("failed to read /etc/passwd: {}", e));
+                return;
+            }
+        }
+    } else if let Some(uid) = target_uid {
+        match find_user_by_uid(uid) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                err(&format!("unknown uid: {}", uid));
+                return;
+            }
+            Err(e) => {
+                err(&format!("failed to read /etc/passwd: {}", e));
+                return;
+            }
+        }
+    } else if session_auto {
+        if !have_cmd("loginctl") {
+            err("loginctl not available; cannot --session-auto");
+            return;
+        }
+
+        // Pick the first Active user session (wayland/x11, class user).
+        let out = Command::new("loginctl")
+            .args(["list-sessions", "--no-legend"])
+            .output()
+            .ok();
+
+        let mut picked: Option<u32> = None;
+        if let Some(out) = out {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                'outer: for line in text.lines() {
+                    let sid = match line.split_whitespace().next() {
+                        Some(x) => x,
+                        None => continue,
+                    };
+                    let active = Command::new("loginctl")
+                        .args(["show-session", sid, "-p", "Active", "--value"])
+                        .output()
+                        .ok()
+                        .and_then(|o| String::from_utf8(o.stdout).ok())
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    if active != "yes" {
+                        continue;
+                    }
+                    let class = Command::new("loginctl")
+                        .args(["show-session", sid, "-p", "Class", "--value"])
+                        .output()
+                        .ok()
+                        .and_then(|o| String::from_utf8(o.stdout).ok())
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    if class != "user" {
+                        continue;
+                    }
+                    let ty = Command::new("loginctl")
+                        .args(["show-session", sid, "-p", "Type", "--value"])
+                        .output()
+                        .ok()
+                        .and_then(|o| String::from_utf8(o.stdout).ok())
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    if ty != "wayland" && ty != "x11" {
+                        continue;
+                    }
+                    let user_uid = Command::new("loginctl")
+                        .args(["show-session", sid, "-p", "User", "--value"])
+                        .output()
+                        .ok()
+                        .and_then(|o| String::from_utf8(o.stdout).ok())
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    if let Ok(u) = user_uid.parse::<u32>() {
+                        picked = Some(u);
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        let uid = match picked {
+            Some(u) => u,
+            None => {
+                err("could not auto-detect active graphical session user");
+                return;
+            }
+        };
+
+        match find_user_by_uid(uid) {
+            Ok(Some(t)) => t,
+            _ => {
+                err("could not resolve session uid to a user");
+                return;
+            }
+        }
+    } else {
+        // Default: current user context
+        let uid = current_uid();
+        let user = current_user();
+        let home = current_home();
+        Target { uid, user, home }
+    };
+
+    // Use Target.user so it isn't dead-code, and it’s genuinely useful for UX.
+    // Keep it subtle (dim).
+    info(&format!(
+        "target: {} (uid {})",
+        target.user,
+        target.uid
+    ));
+
+    // Remaining args: command...
     if i >= args.len() {
         usage();
         return;
     }
 
     let cmd = args[i].clone();
-    let rest = args[(i + 1)..].to_vec();
-
-    let user = resolve_target_user(explicit_uid, explicit_user.clone(), session_auto)
-        .unwrap_or_else(|_| user_by_uid(current_euid().unwrap_or(0)).unwrap());
+    i += 1;
 
     match cmd.as_str() {
         "list-classes" => {
-            let show_keys = matches!(rest.get(0).map(|s| s.as_str()), Some("--keys") | Some("-k"));
-            match get_classes_for(&user) {
+            let mut show_keys = false;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--keys" | "-k" => show_keys = true,
+                    _ => break,
+                }
+                i += 1;
+            }
+
+            match get_classes(&target) {
                 Ok(classes) => {
-                    if show_keys {
-                        print_class_keys(classes);
-                    } else if classes.is_empty() {
+                    if classes.is_empty() {
                         println!("(no forced classes configured)");
+                    } else if show_keys {
+                        for c in classes {
+                            println!("{:<24} -> {}", c, class_key(&c));
+                        }
                     } else {
                         for c in classes {
                             println!("{}", c);
                         }
                     }
                 }
-                Err(e) => eprintln!("focusctl: failed to read config: {}", e),
+                Err(e) => err(&format!("failed to read config: {}", e)),
             }
         }
 
-        "list-keys" => match get_classes_for(&user) {
-            Ok(classes) => print_class_keys(classes),
-            Err(e) => eprintln!("focusctl: failed to read config: {}", e),
+        "list-keys" => match get_classes(&target) {
+            Ok(classes) => {
+                if classes.is_empty() {
+                    println!("(no forced classes configured)");
+                } else {
+                    for c in classes {
+                        println!("{:<24} -> {}", c, class_key(&c));
+                    }
+                }
+            }
+            Err(e) => err(&format!("failed to read config: {}", e)),
         },
 
         "add-class" => {
-            let class = match rest.get(0) {
+            let class = match args.get(i) {
                 Some(c) => c.clone(),
                 None => {
-                    eprintln!("focusctl: add-class requires <window-class>");
+                    err("add-class requires <window-class>");
                     return;
                 }
             };
@@ -986,134 +1050,220 @@ fn main() {
             let input = class.trim().to_string();
             let ikey = class_key(&input);
             if ikey.is_empty() {
-                eprintln!("focusctl: class is empty");
+                err("empty class");
                 return;
             }
 
-            let mut classes = get_classes_for(&user).unwrap_or_default();
+            let mut classes = get_classes(&target).unwrap_or_default();
             let exists = classes.iter().any(|c| class_key(c) == ikey);
 
-            if !exists {
-                classes.push(input);
-                classes = dedupe_by_key_keep_first(classes);
-                if let Err(e) = set_classes_for(&user, &classes) {
-                    eprintln!("focusctl: failed to write config: {}", e);
-                } else if let Ok(sess) = resolve_session_env(&user) {
-                    reload_kwin_config_with_env(&sess);
-                    eprintln!("focusctl: added class");
-                } else {
-                    eprintln!("focusctl: added class (no session env for reconfigure)");
-                }
+            if exists {
+                info("class already present");
+                return;
+            }
+
+            classes.push(input);
+            if let Err(e) = set_classes(&target, &classes, true) {
+                err(&format!("failed to write config: {}", e));
             } else {
-                eprintln!("focusctl: class already present (case-insensitive / .desktop-insensitive)");
+                info("added class");
             }
         }
 
         "remove-class" => {
-            let class = match rest.get(0) {
+            let class = match args.get(i) {
                 Some(c) => c.clone(),
                 None => {
-                    eprintln!("focusctl: remove-class requires <window-class>");
+                    err("remove-class requires <window-class>");
                     return;
                 }
             };
 
-            let target_key = class_key(&class);
-            if target_key.is_empty() {
-                eprintln!("focusctl: class is empty");
+            let tkey = class_key(&class);
+            if tkey.is_empty() {
+                err("empty class");
                 return;
             }
 
-            let mut classes = get_classes_for(&user).unwrap_or_default();
+            let mut classes = get_classes(&target).unwrap_or_default();
             let before = classes.len();
-            classes.retain(|c| class_key(c) != target_key);
+            classes.retain(|c| class_key(c) != tkey);
 
             if classes.len() == before {
-                eprintln!("focusctl: class not found (case-insensitive / .desktop-insensitive)");
+                info("class not found");
                 return;
             }
 
-            if let Err(e) = set_classes_for(&user, &classes) {
-                eprintln!("focusctl: failed to write config: {}", e);
-            } else if let Ok(sess) = resolve_session_env(&user) {
-                reload_kwin_config_with_env(&sess);
-                eprintln!("focusctl: removed class");
+            if let Err(e) = set_classes(&target, &classes, true) {
+                err(&format!("failed to write config: {}", e));
             } else {
-                eprintln!("focusctl: removed class (no session env for reconfigure)");
+                info("removed class");
             }
         }
 
         "set-classes" => {
-            let spec = match rest.get(0) {
+            let spec = match args.get(i) {
                 Some(s) => s.clone(),
                 None => {
-                    eprintln!("focusctl: set-classes requires a list like 'a;b;c'");
+                    err("set-classes requires a list like 'a;b;c'");
                     return;
                 }
             };
 
-            let classes = dedupe_by_key_keep_first(parse_classes(&spec));
-            if let Err(e) = set_classes_for(&user, &classes) {
-                eprintln!("focusctl: failed to write config: {}", e);
-            } else if let Ok(sess) = resolve_session_env(&user) {
-                reload_kwin_config_with_env(&sess);
-                eprintln!("focusctl: set classes");
+            let classes = parse_classes(&spec);
+            if let Err(e) = set_classes(&target, &classes, true) {
+                err(&format!("failed to write config: {}", e));
             } else {
-                eprintln!("focusctl: set classes (no session env for reconfigure)");
+                info("set classes");
             }
         }
 
         "clear" => {
             let classes: Vec<String> = Vec::new();
-            if let Err(e) = set_classes_for(&user, &classes) {
-                eprintln!("focusctl: failed to write config: {}", e);
-            } else if let Ok(sess) = resolve_session_env(&user) {
-                reload_kwin_config_with_env(&sess);
-                eprintln!("focusctl: cleared classes");
+            if let Err(e) = set_classes(&target, &classes, true) {
+                err(&format!("failed to write config: {}", e));
             } else {
-                eprintln!("focusctl: cleared classes (no session env for reconfigure)");
+                info("cleared classes");
             }
         }
 
         "enable" => {
-            if let Err(e) = set_enabled_for(&user, true) {
-                eprintln!("focusctl: failed to enable script: {}", e);
-            } else if let Ok(sess) = resolve_session_env(&user) {
-                reload_kwin_config_with_env(&sess);
-                eprintln!("focusctl: enabled {}", SCRIPT_ID);
+            if let Err(e) = set_enabled(&target, true, true) {
+                err(&format!("failed to enable script: {}", e));
             } else {
-                eprintln!("focusctl: enabled {} (no session env for reconfigure)", SCRIPT_ID);
+                info(&format!("enabled {}", SCRIPT_ID));
             }
         }
 
         "disable" => {
-            if let Err(e) = set_enabled_for(&user, false) {
-                eprintln!("focusctl: failed to disable script: {}", e);
-            } else if let Ok(sess) = resolve_session_env(&user) {
-                reload_kwin_config_with_env(&sess);
-                eprintln!("focusctl: disabled {}", SCRIPT_ID);
+            if let Err(e) = set_enabled(&target, false, true) {
+                err(&format!("failed to disable script: {}", e));
             } else {
-                eprintln!("focusctl: disabled {} (no session env for reconfigure)", SCRIPT_ID);
+                info(&format!("disabled {}", SCRIPT_ID));
             }
         }
 
-        "enabled" => match get_enabled_for(&user) {
+        "enabled" => match get_enabled(&target) {
             Ok(Some(true)) => println!("true"),
             Ok(Some(false)) => println!("false"),
             Ok(None) => println!("(unset)"),
-            Err(e) => eprintln!("focusctl: failed to read enabled flag: {}", e),
+            Err(e) => err(&format!("failed to read enabled flag: {}", e)),
         },
 
         "reconfigure" => {
-            if let Ok(sess) = resolve_session_env(&user) {
-                reload_kwin_config_with_env(&sess);
+            reload_kwin_config(&target);
+        }
+
+        "wrap" => {
+            // wrap <ClassName>|--auto [--dry-run] [--no-enable] [--no-reconfigure] -- <command...>
+            let mut dry_run = false;
+            let mut no_enable = false;
+            let mut no_reconf = false;
+
+            let class_or_auto = match args.get(i) {
+                Some(s) => s.clone(),
+                None => {
+                    err("wrap requires <ClassName>|--auto and '-- <command...>'");
+                    usage();
+                    return;
+                }
+            };
+            i += 1;
+
+            let mut class_name: Option<String> = None;
+            let mut auto = false;
+
+            if class_or_auto == "--auto" {
+                auto = true;
             } else {
-                reload_kwin_config_with_env(&SessionEnv::default());
+                class_name = Some(class_or_auto);
+            }
+
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--dry-run" => dry_run = true,
+                    "--no-enable" => no_enable = true,
+                    "--no-reconfigure" => no_reconf = true,
+                    "--" => {
+                        i += 1;
+                        break;
+                    }
+                    _ => {
+                        err(&format!("unknown wrap option: {}", args[i]));
+                        return;
+                    }
+                }
+                i += 1;
+            }
+
+            if i >= args.len() {
+                err("wrap: missing command after '--'");
+                return;
+            }
+
+            let cmd_argv: Vec<String> = args[i..].to_vec();
+            let argv0 = cmd_argv.get(0).cloned().unwrap_or_default();
+
+            let final_class = if auto {
+                auto_class_from_argv0(&argv0)
+            } else {
+                class_name.unwrap_or_else(|| "App".to_string())
+            };
+
+            let key = class_key(&final_class);
+            if key.is_empty() {
+                err("wrap: empty class name");
+                return;
+            }
+
+            // Ensure the class exists in config (preserve spelling).
+            let mut classes = get_classes(&target).unwrap_or_default();
+            let exists = classes.iter().any(|c| class_key(c) == key);
+
+            if dry_run {
+                info(&format!(
+                    "[dry-run] would ensure integration for class: {}",
+                    final_class
+                ));
+                if !no_enable {
+                    info("[dry-run] would enable script");
+                }
+                if !no_reconf {
+                    info("[dry-run] would request KWin reconfigure");
+                }
+                info(&format!("[dry-run] would exec: {:?}", cmd_argv));
+                return;
+            }
+
+            if !exists {
+                classes.push(final_class.clone());
+                if let Err(e) = set_classes(&target, &classes, false) {
+                    err(&format!("wrap: failed to write class list: {}", e));
+                    return;
+                }
+            }
+
+            if !no_enable {
+                let _ = set_enabled(&target, true, false);
+            }
+
+            if !no_reconf {
+                reload_kwin_config(&target);
+            }
+
+            // Exec the command
+            let mut c = Command::new(&cmd_argv[0]);
+            if cmd_argv.len() > 1 {
+                c.args(&cmd_argv[1..]);
+            }
+
+            if let Err(e) = exec_replace(c) {
+                err(&format!("exec failed: {}", e));
             }
         }
 
-        "wrap" => handle_wrap(rest, explicit_uid, explicit_user, session_auto),
-
-        _ => usage(),
+        _ => {
+            usage();
+        }
     }
 }
