@@ -69,8 +69,9 @@ A small helper to manage configuration safely:
 
 ```
 focusctl list-classes
-focusctl add-class google-chrome
-focusctl remove-class google-chrome
+focusctl add-class google-chrome-stable
+focusctl remove-class google-chrome-stable
+focusctl list-keys
 ```
 
 ## Install
@@ -94,7 +95,7 @@ make test
 Add one or more window classes that should be allowed to receive focus:
 
 ```
-focusctl add-class google-chrome
+focusctl add-class google-chrome-stable
 focusctl add-class firefox
 ```
 
@@ -105,7 +106,7 @@ To list or remove entries:
 
 ```
 focusctl list-classes
-focusctl remove-class google-chrome
+focusctl remove-class google-chrome-stable
 focusctl remove-class firefox
 ```
 
@@ -124,6 +125,19 @@ This allows sandboxed applications to behave normally
 without permanently changing user focus policy.
 
 Programmatic integration examples will be added over time.
+
+### Integration wrappers (`focusctl wrap`)
+
+For most integrations, **`focusctl wrap` is the recommended interface**.
+
+It provides a minimal, explicit way for launchers and sandbox tools to opt into
+focus handling — without embedding KWin-specific logic.
+
+Example:
+
+```
+focusctl wrap ProcletChrome -- google-chrome-stable
+```
 
 ## Troubleshooting
 
