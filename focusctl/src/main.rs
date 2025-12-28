@@ -981,11 +981,7 @@ fn main() {
 
     // Use Target.user so it isn't dead-code, and it’s genuinely useful for UX.
     // Keep it subtle (dim).
-    info(&format!(
-        "target: {} (uid {})",
-        target.user,
-        target.uid
-    ));
+    info(&format!("target: {} (uid {})", target.user, target.uid));
 
     // Remaining args: command...
     if i >= args.len() {
@@ -1156,48 +1152,67 @@ fn main() {
 
         "wrap" => {
             // wrap <ClassName>|--auto [--dry-run] [--no-enable] [--no-reconfigure] -- <command...>
+            // Also accepted:
+            //   wrap --dry-run <ClassName> -- <cmd...>
+            //   wrap --no-enable --auto -- <cmd...>
             let mut dry_run = false;
             let mut no_enable = false;
             let mut no_reconf = false;
 
-            let class_or_auto = match args.get(i) {
-                Some(s) => s.clone(),
-                None => {
-                    err("wrap requires <ClassName>|--auto and '-- <command...>'");
-                    usage();
-                    return;
-                }
-            };
-            i += 1;
-
             let mut class_name: Option<String> = None;
             let mut auto = false;
 
-            if class_or_auto == "--auto" {
-                auto = true;
-            } else {
-                class_name = Some(class_or_auto);
-            }
-
+            // Parse tokens until `--`.
+            // Rule:
+            //   - known flags are accepted in any order
+            //   - first non-flag token is class name (unless --auto used)
+            //   - `--` terminates and starts the command argv
             while i < args.len() {
-                match args[i].as_str() {
-                    "--dry-run" => dry_run = true,
-                    "--no-enable" => no_enable = true,
-                    "--no-reconfigure" => no_reconf = true,
+                let a = args[i].as_str();
+                match a {
+                    "--dry-run" => {
+                        dry_run = true;
+                        i += 1;
+                    }
+                    "--no-enable" => {
+                        no_enable = true;
+                        i += 1;
+                    }
+                    "--no-reconfigure" => {
+                        no_reconf = true;
+                        i += 1;
+                    }
+                    "--auto" => {
+                        auto = true;
+                        i += 1;
+                    }
                     "--" => {
                         i += 1;
                         break;
                     }
                     _ => {
-                        err(&format!("unknown wrap option: {}", args[i]));
-                        return;
+                        // Positional: class name (only one)
+                        if class_name.is_none() {
+                            class_name = Some(args[i].clone());
+                            i += 1;
+                        } else {
+                            err(&format!("wrap: unexpected extra argument: {}", args[i]));
+                            err("hint: use `--` before the command, e.g. `focusctl wrap ProcletChrome -- echo OK`");
+                            return;
+                        }
                     }
                 }
-                i += 1;
             }
 
             if i >= args.len() {
                 err("wrap: missing command after '--'");
+                return;
+            }
+
+            // If neither class nor auto was given, it's an error.
+            if !auto && class_name.is_none() {
+                err("wrap requires <ClassName> or --auto");
+                usage();
                 return;
             }
 
