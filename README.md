@@ -80,12 +80,14 @@ focusctl list-keys
 git clone https://github.com/darko5r/kwin-focus-helper.git
 cd kwin-focus-helper
 make install
-
+```
 Pass installer options through ARGS, e.g.:
+```
 make reinstall ARGS='-y'
 make install ARGS='--no-focusctl'
-
+```
 Installation check:
+```
 make status
 make test
 ```
