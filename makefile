@@ -9,38 +9,47 @@ BINDIR := $(prefix)/bin
 MANDIR := $(prefix)/share/man
 
 FOCUSCTL_DIR := focusctl
-FOCUSCTL_BIN := $(FOCUSCTL_DIR)/target/release/focusctl
 FOCUSCTL_MAN := $(FOCUSCTL_DIR)/man/focusctl.1
 
-# Build artifacts should NOT pollute the repo during packaging
-# AUR/PKGBUILD can override this too.
+# Allow PKGBUILD / user to override where Cargo writes artifacts.
+# Default stays inside the repo for dev usage.
 CARGO_TARGET_DIR ?= $(FOCUSCTL_DIR)/target
+CARGO_TARGET_ABS := $(abspath $(CARGO_TARGET_DIR))
+FOCUSCTL_BIN := $(CARGO_TARGET_ABS)/release/focusctl
 
-.PHONY: help build install install-user uninstall-user status test lint clean
+.PHONY: help build man install install-user uninstall-user status test lint clean dist
 
 help:
 	@echo "Targets:"
-	@echo "  make build                           - build focusctl (release)"
-	@echo "  make install [prefix=/usr] [DESTDIR=] - packaging install (no kpackagetool)"
-	@echo "  make install-user [ARGS='...']        - developer install via install.sh/kpackagetool"
-	@echo "  make uninstall-user [ARGS='...']      - remove dev install (kpackagetool)"
-	@echo "  make status                           - show installed/enabled status (both fs + kpackagetool)"
-	@echo "  make test                             - DBus isScriptLoaded() check (best-effort)"
-	@echo "  make lint                             - basic sanity checks"
-	@echo "  make clean                            - remove build artifacts"
+	@echo "  make build                              - build focusctl (release)"
+	@echo "  make man                                - build focusctl manpage (.gz preview path)"
+	@echo "  make install [prefix=/usr] [DESTDIR=]    - packaging install (no kpackagetool)"
+	@echo "  make install-user [ARGS='...']           - developer install via install.sh/kpackagetool"
+	@echo "  make uninstall-user [ARGS='...']         - remove dev install (kpackagetool)"
+	@echo "  make status                              - show installed/enabled status (fs + kpackagetool)"
+	@echo "  make test                                - DBus isScriptLoaded() check (best-effort)"
+	@echo "  make lint                                - basic sanity checks"
+	@echo "  make clean                               - remove build artifacts"
+	@echo "  make dist                                - create a local source tarball (optional)"
 	@echo
 	@echo "Examples:"
 	@echo "  make build"
 	@echo "  make install DESTDIR=$$PWD/pkgdir prefix=/usr"
 	@echo "  make install-user ARGS='--user 1000 -y'"
 	@echo "  make uninstall-user ARGS='--user 1000 -y'"
+	@echo "  CARGO_TARGET_DIR=/tmp/cargo-target make build"
 
 # --------------------
 # Build (packaging-safe)
 # --------------------
 build:
 	@echo "==> Building focusctl (release)"
-	@cd $(FOCUSCTL_DIR) && CARGO_TARGET_DIR="$(abspath $(CARGO_TARGET_DIR))" cargo build --release
+	@cd $(FOCUSCTL_DIR) && CARGO_TARGET_DIR="$(CARGO_TARGET_ABS)" cargo build --release --locked
+
+# Optional convenience (install already gzips it)
+man:
+	@echo "==> Man source: $(FOCUSCTL_MAN)"
+	@echo "==> (Install will gzip it to: $(DESTDIR)$(MANDIR)/man1/focusctl.1.gz)"
 
 # --------------------
 # Install (for AUR/pkg)
@@ -125,5 +134,11 @@ lint:
 	@echo "OK"
 
 clean:
-	@echo "==> Cleaning build artifacts"
-	@rm -rf "$(CARGO_TARGET_DIR)"
+	@echo "==> Cleaning build artifacts: $(CARGO_TARGET_ABS)"
+	@rm -rf "$(CARGO_TARGET_ABS)"
+
+# Optional helper: create a local tarball like GitHub tags do
+dist:
+	@echo "==> Creating local source tarball"
+	@tar --exclude-vcs --exclude='$(FOCUSCTL_DIR)/target' --exclude='$(CARGO_TARGET_DIR)' -czf "$(SCRIPT_ID)-dev.tar.gz" .
+	@echo "==> Wrote $(SCRIPT_ID)-dev.tar.gz"
