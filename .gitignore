@@ -57,3 +57,15 @@ Thumbs.db
 # Meson / generic build dir (future use)
 # -------------------------
 /build/
+
+# -------------------------
+# makepkg build dirs
+# -------------------------
+pkg/
+src/
+
+# -------------------------
+# Built packages
+# -------------------------
+*.pkg.tar.*
+*.tar.gz
