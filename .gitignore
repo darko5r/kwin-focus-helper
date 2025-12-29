@@ -69,3 +69,10 @@ src/
 # -------------------------
 *.pkg.tar.*
 *.tar.gz
+
+# -------------------------
+# AUR packaging files (kept in separate AUR repo)
+# -------------------------
+PKGBUILD
+.SRCINFO
+*.install
