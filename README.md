@@ -138,7 +138,7 @@ focus handling — without embedding KWin-specific logic.
 Example:
 
 ```
-focusctl wrap ProcletChrome -- google-chrome-stable
+focusctl wrap proclet -- google-chrome-stable
 ```
 
 ## Troubleshooting
