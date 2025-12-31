@@ -152,7 +152,8 @@ focusctl wrap ProcletChrome -- google-chrome-stable
 ```
 focusctl wrap ProcletChrome -- proclet -- google-chrome-stable
 ```
-### or auto class from argv[0] (echo -> EchoApp)
+### or auto class 
+#### from argv[0] (echo -> EchoApp)
 ```
 focusctl wrap --auto -- google-chrome-stable
 ```
