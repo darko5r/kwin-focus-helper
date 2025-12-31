@@ -143,10 +143,15 @@ focus handling — without embedding KWin-specific logic.
 Example:
 
 ### explicit class
+
+#### direct launch
 ```
 focusctl wrap ProcletChrome -- google-chrome-stable
 ```
-
+#### sandboxed launch (example)
+```
+focusctl wrap ProcletChrome -- proclet -- google-chrome-stable
+```
 ### or auto class from argv[0] (echo -> EchoApp)
 ```
 focusctl wrap --auto -- google-chrome-stable
