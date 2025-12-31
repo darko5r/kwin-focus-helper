@@ -19,10 +19,15 @@ need to raise or focus new windows, such as those launched via:
 
 ## Requirements
 
+### Runtime
 - KDE Plasma (KWin window manager)
-- Plasma 6 / KWin 6 (should also work on many Plasma 5 setups)
-- `kpackagetool6` (install)
-- Optional: Rust toolchain (`cargo`) — install via your distro packages (e.g. “rust”/“cargo”) or via rustup
+
+### Optional tools (recommended)
+- `qdbus6` (or compatible `qdbus`) for `focusctl reconfigure` convenience
+
+### Building from source
+- Rust toolchain (`cargo`) to build `focusctl`
+- `kpackagetool6` (only needed for *per-user* installs via `install.sh`)
 
 ---
 
@@ -137,8 +142,14 @@ focus handling — without embedding KWin-specific logic.
 
 Example:
 
+### explicit class
 ```
-focusctl wrap proclet -- google-chrome-stable
+focusctl wrap ProcletChrome -- google-chrome-stable
+```
+
+### or auto class from argv[0] (echo -> EchoApp)
+```
+focusctl wrap --auto -- google-chrome-stable
 ```
 
 ## Troubleshooting
@@ -165,4 +176,10 @@ kbuildsycoca6
 After this, install again:
 ```
 make install
+```
+
+## How to find your window class?
+### click the window → use the second string usually
+```
+xprop WM_CLASS
 ```
