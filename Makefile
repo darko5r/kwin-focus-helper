@@ -12,39 +12,42 @@ FOCUSCTL_DIR := focusctl
 FOCUSCTL_MAN := $(FOCUSCTL_DIR)/man/focusctl.1
 
 # Allow PKGBUILD / user to override where Cargo writes artifacts.
-# Default stays inside the repo for dev usage.
 CARGO_TARGET_DIR ?= $(FOCUSCTL_DIR)/target
 CARGO_TARGET_ABS := $(abspath $(CARGO_TARGET_DIR))
 FOCUSCTL_BIN := $(CARGO_TARGET_ABS)/release/focusctl
+
+# Tool overrides (important for rustup vs system cargo)
+CARGO ?= cargo
+GZIP ?= gzip
 
 .PHONY: help build man install install-user uninstall-user status test lint clean dist
 
 help:
 	@echo "Targets:"
-	@echo "  make build                              - build focusctl (release)"
-	@echo "  make man                                - build focusctl manpage (.gz preview path)"
-	@echo "  make install [prefix=/usr] [DESTDIR=]    - packaging install (no kpackagetool)"
-	@echo "  make install-user [ARGS='...']           - developer install via install.sh/kpackagetool"
-	@echo "  make uninstall-user [ARGS='...']         - remove dev install (kpackagetool)"
-	@echo "  make status                              - show installed/enabled status (fs + kpackagetool)"
-	@echo "  make test                                - DBus isScriptLoaded() check (best-effort)"
-	@echo "  make lint                                - basic sanity checks"
-	@echo "  make clean                               - remove build artifacts"
-	@echo "  make dist                                - create a local source tarball (optional)"
+	@echo "  make build                               - build focusctl (release)"
+	@echo "  make man                                 - show man source path (install gzips it)"
+	@echo "  make install [prefix=/usr] [DESTDIR=]     - packaging install (no kpackagetool)"
+	@echo "  make install-user [ARGS='...']            - developer install via install.sh/kpackagetool"
+	@echo "  make uninstall-user [ARGS='...']          - remove dev install (kpackagetool)"
+	@echo "  make status                               - show installed/enabled status (fs + kpackagetool)"
+	@echo "  make test                                 - DBus isScriptLoaded() check (best-effort)"
+	@echo "  make lint                                 - basic sanity checks"
+	@echo "  make clean                                - remove build artifacts"
+	@echo "  make dist                                 - create a local source tarball (optional)"
 	@echo
 	@echo "Examples:"
 	@echo "  make build"
 	@echo "  make install DESTDIR=$$PWD/pkgdir prefix=/usr"
 	@echo "  make install-user ARGS='--user 1000 -y'"
-	@echo "  make uninstall-user ARGS='--user 1000 -y'"
 	@echo "  CARGO_TARGET_DIR=/tmp/cargo-target make build"
+	@echo "  make CARGO=/usr/bin/cargo build"
 
 # --------------------
 # Build (packaging-safe)
 # --------------------
 build:
 	@echo "==> Building focusctl (release)"
-	@cd $(FOCUSCTL_DIR) && CARGO_TARGET_DIR="$(CARGO_TARGET_ABS)" cargo build --release --locked
+	@cd "$(FOCUSCTL_DIR)" && CARGO_TARGET_DIR="$(CARGO_TARGET_ABS)" "$(CARGO)" build --release --locked
 
 # Optional convenience (install already gzips it)
 man:
@@ -58,9 +61,8 @@ man:
 # --------------------
 install: build
 	@echo "==> Installing KWin script to $(DESTDIR)$(KWINSCRIPTDIR)"
-	@install -d "$(DESTDIR)$(KWINSCRIPTDIR)"
-	@install -m 0644 metadata.json "$(DESTDIR)$(KWINSCRIPTDIR)/metadata.json"
 	@install -d "$(DESTDIR)$(KWINSCRIPTDIR)/contents/code"
+	@install -m 0644 metadata.json "$(DESTDIR)$(KWINSCRIPTDIR)/metadata.json"
 	@install -m 0644 contents/code/main.js "$(DESTDIR)$(KWINSCRIPTDIR)/contents/code/main.js"
 
 	@echo "==> Installing focusctl to $(DESTDIR)$(BINDIR)/focusctl"
@@ -69,7 +71,7 @@ install: build
 
 	@echo "==> Installing man page to $(DESTDIR)$(MANDIR)/man1"
 	@install -d "$(DESTDIR)$(MANDIR)/man1"
-	@gzip -c "$(FOCUSCTL_MAN)" > "$(DESTDIR)$(MANDIR)/man1/focusctl.1.gz"
+	@"$(GZIP)" -c "$(FOCUSCTL_MAN)" > "$(DESTDIR)$(MANDIR)/man1/focusctl.1.gz"
 
 # --------------------
 # Dev install (your current workflow)
@@ -85,7 +87,7 @@ uninstall-user:
 # --------------------
 status:
 	@echo "==> Filesystem install locations:"
-	@sys="$(prefix)/share/kwin/scripts/$(SCRIPT_ID)"; \
+	@sys="/usr/share/kwin/scripts/$(SCRIPT_ID)"; \
 	user="$$HOME/.local/share/kwin/scripts/$(SCRIPT_ID)"; \
 	if [ -d "$$sys" ]; then echo "  [system] $$sys"; else echo "  [system] (not found) $$sys"; fi; \
 	if [ -d "$$user" ]; then echo "  [user]   $$user"; else echo "  [user]   (not found) $$user"; fi
@@ -111,6 +113,10 @@ status:
 # --------------------
 test:
 	@echo "==> DBus: isScriptLoaded($(SCRIPT_ID)) (best-effort)"
+	@if [ -z "$$DBUS_SESSION_BUS_ADDRESS" ] || [ -z "$$XDG_RUNTIME_DIR" ]; then \
+	  echo "  Note: DBUS_SESSION_BUS_ADDRESS / XDG_RUNTIME_DIR not set in this shell."; \
+	  echo "  Run this from a terminal inside your Plasma session for best results."; \
+	fi
 	@ok=0; \
 	for c in qdbus6 qdbus-qt6 qdbus-qt5 qdbus; do \
 	  if command -v $$c >/dev/null 2>&1; then \
@@ -120,7 +126,7 @@ test:
 	  fi; \
 	done; \
 	if [ $$ok -eq 0 ]; then \
-	  echo "  No working qdbus found (or no session bus in this shell)."; \
+	  echo "  Could not query KWin via DBus (no qdbus, or no session bus in this shell)."; \
 	fi
 
 lint:
@@ -140,5 +146,8 @@ clean:
 # Optional helper: create a local tarball like GitHub tags do
 dist:
 	@echo "==> Creating local source tarball"
-	@tar --exclude-vcs --exclude='$(FOCUSCTL_DIR)/target' --exclude='$(CARGO_TARGET_DIR)' -czf "$(SCRIPT_ID)-dev.tar.gz" .
+	@tar --exclude-vcs \
+	  --exclude='pkg' --exclude='src' \
+	  --exclude='$(FOCUSCTL_DIR)/target' \
+	  -czf "$(SCRIPT_ID)-dev.tar.gz" .
 	@echo "==> Wrote $(SCRIPT_ID)-dev.tar.gz"
