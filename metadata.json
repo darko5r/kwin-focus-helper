@@ -5,7 +5,7 @@
     "Name": "KWin Focus Helper",
     "Description": "Force-focus to specific apps without changing global focus settings.",
     "Icon": "preferences-system-windows",
-    "Version": "0.1.1",
+    "Version": "0.1.2",
     "License": "MIT",
     "Authors": [
       { "Name": "darko5r" }
