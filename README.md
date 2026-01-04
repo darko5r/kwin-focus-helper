@@ -199,4 +199,4 @@
 
 ## <sub>License</sub>
 
-> MIT
+> [MIT](LICENSE)
