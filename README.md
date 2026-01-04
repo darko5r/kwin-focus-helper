@@ -121,3 +121,82 @@
 > ```
 > yay -S kwin-focus-helper
 > ```
+
+## <sub>Usage</sub>
+
+> Add one or more window classes that should be allowed to receive focus:
+> ```
+> focusctl add-class google-chrome-stable
+> focusctl add-class firefox
+>```
+>New windows from these applications will now raise and focus correctly,
+>even when global focus stealing prevention is set to Medium.
+>
+>Manage entries:
+>```
+>focusctl list-classes
+>focusctl remove-class google-chrome-stable
+>```
+
+## <sub>Integration & automation</sub>
+
+> `kwin-focus-helper` is designed to integrate cleanly with
+> launchers and sandboxing tools.
+>
+> A typical flow:
+>
+>    1. Temporarily allow a window class
+>    2. Reconfigure KWin
+>    3. Launch the wrapped / sandboxed application
+>    4. (Optional) remove the class afterward
+>
+> This enables correct behavior without permanently changing user policy.
+>
+> `focusctl wrap` (recommended)
+>
+> For most integrations, `focusctl wrap` is the preferred interface.
+>
+> It provides an explicit, minimal boundary between launch logic and KWin behavior.
+> 
+> ***Explicit class***
+> ```
+> focusctl wrap ProcletChrome -- google-chrome-stable
+>```
+> ***Sandboxed example***
+> ```
+> focusctl wrap ProcletChrome -- proclet -- google-chrome-stable
+> ```
+> ***Automatic class (derived from argv[0])***
+> ```
+> focusctl wrap --auto -- google-chrome-stable
+> ```
+
+## <sub>Troubleshooting</sub>
+
+> ***Script installs but does not appear or update in KWin***
+>
+> In rare cases, KDE’s service cache may become stale.
+>
+> You can fully reset the script and rebuild caches:
+>```
+> kpackagetool6 --type=KWin/Script -r kwin-focus-helper
+> rm -rf ~/.local/share/kwin/scripts/kwin-focus-helper
+> rm -f ~/.cache/ksycoca6_*
+> kbuildsycoca6
+>```
+> Then reinstall:
+>```
+> make install
+>```
+
+## <sub>Finding your window class</sub>
+
+> Click the target window and run:
+>```
+> xprop WM_CLASS
+>```
+> Usually, the second string is the correct class name.
+
+## <sub>License</sub>
+
+> MIT
