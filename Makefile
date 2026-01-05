@@ -20,13 +20,17 @@ FOCUSCTL_BIN := $(CARGO_TARGET_ABS)/release/focusctl
 CARGO ?= cargo
 GZIP ?= gzip
 
-.PHONY: help build man install install-user uninstall-user status test lint clean dist
+.PHONY: help build man \
+        install install-with-build \
+        install-user uninstall-user \
+        status test lint clean dist
 
 help:
 	@echo "Targets:"
 	@echo "  make build                               - build focusctl (release)"
 	@echo "  make man                                 - show man source path (install gzips it)"
-	@echo "  make install [prefix=/usr] [DESTDIR=]     - packaging install (no kpackagetool)"
+	@echo "  make install [prefix=/usr] [DESTDIR=]     - packaging install (files only; requires build done)"
+	@echo "  make install-with-build [prefix=/usr] [DESTDIR=] - build + install (dev convenience)"
 	@echo "  make install-user [ARGS='...']            - developer install via install.sh/kpackagetool"
 	@echo "  make uninstall-user [ARGS='...']          - remove dev install (kpackagetool)"
 	@echo "  make status                               - show installed/enabled status (fs + kpackagetool)"
@@ -38,6 +42,7 @@ help:
 	@echo "Examples:"
 	@echo "  make build"
 	@echo "  make install DESTDIR=$$PWD/pkgdir prefix=/usr"
+	@echo "  make install-with-build DESTDIR=$$PWD/pkgdir prefix=/usr"
 	@echo "  make install-user ARGS='--user 1000 -y'"
 	@echo "  CARGO_TARGET_DIR=/tmp/cargo-target make build"
 	@echo "  make CARGO=/usr/bin/cargo build"
@@ -58,8 +63,15 @@ man:
 # Install (for AUR/pkg)
 #   - copies files only
 #   - NO kpackagetool
+#   - does NOT build (PKGBUILD should call: make build && make install ...)
 # --------------------
-install: build
+install:
+	@if [ ! -x "$(FOCUSCTL_BIN)" ]; then \
+	  echo "!! focusctl binary not found: $(FOCUSCTL_BIN)"; \
+	  echo "   Run: make build   (or use: make install-with-build)"; \
+	  exit 1; \
+	fi
+
 	@echo "==> Installing KWin script to $(DESTDIR)$(KWINSCRIPTDIR)"
 	@install -d "$(DESTDIR)$(KWINSCRIPTDIR)/contents/code"
 	@install -m 0644 metadata.json "$(DESTDIR)$(KWINSCRIPTDIR)/metadata.json"
@@ -72,6 +84,9 @@ install: build
 	@echo "==> Installing man page to $(DESTDIR)$(MANDIR)/man1"
 	@install -d "$(DESTDIR)$(MANDIR)/man1"
 	@"$(GZIP)" -c "$(FOCUSCTL_MAN)" > "$(DESTDIR)$(MANDIR)/man1/focusctl.1.gz"
+
+# Dev convenience: old behavior (build + install)
+install-with-build: build install
 
 # --------------------
 # Dev install (your current workflow)
