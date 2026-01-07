@@ -1,4 +1,4 @@
-## <sub>kwin-focus-helper</sub>
+## <small>kwin-focus-helper</small>
 
 > ***Per-application focus control for KWin — without touching global policy***
 >
