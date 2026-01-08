@@ -27,7 +27,7 @@
 >
 > By default, `kwin-focus-helper` does nothing until explicitly configured.
 
-## <sub>Requirements</sub>
+## <sub>`Requirements`</sub>
 > ***Runtime***
 > 
 > - KDE Plasma (KWin window manager)
