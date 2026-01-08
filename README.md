@@ -8,7 +8,7 @@
 > It is designed for non-standard launch contexts where legitimate applications
 > are incorrectly treated as focus stealers.
 
-## <sub>Intended use (important)</sub>
+## <sub>`Intended use (important)`</sub>
 
 > This tool is not a general desktop tweak.
 >
