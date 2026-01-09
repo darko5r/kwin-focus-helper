@@ -42,7 +42,7 @@
 >
 > - `kpackagetool6` — only for manual / per-user installs
 
-## <sub>The problem it solves</sub>
+## <sub>`The problem it solves`</sub>
 
 > KWin’s Focus stealing prevention (often set to _Medium_) is a good global default,
 > but it can break legitimate workflows under certain conditions:
