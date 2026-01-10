@@ -57,7 +57,7 @@
 >
 > `kwin-focus-helper` solves this per application.
 
-## <sub>How it works</sub>
+## <sub>`How it works`</sub>
 
 > - Your global KWin focus policy remains unchanged
 >
