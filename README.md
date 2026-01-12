@@ -99,7 +99,7 @@
 >focusctl list-keys
 >```
 
-## <sub>Installation</sub>
+## <sub>`Installation`</sub>
 
 > ***From source***
 > ```
