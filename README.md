@@ -74,7 +74,7 @@
 >
 > No global overrides. No heuristics. No surprises.
 
-## <sub>Components</sub>
+## <sub>`Components`</sub>
 
 > 1\) 🔹 KWin Script (JavaScript)
 >
