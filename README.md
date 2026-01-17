@@ -122,7 +122,7 @@
 > yay -S kwin-focus-helper
 > ```
 
-## <sub>Usage</sub>
+## <sub>`Usage`</sub>
 
 > Add one or more window classes that should be allowed to receive focus:
 > ```
